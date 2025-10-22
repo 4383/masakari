@@ -15,13 +15,11 @@
 """Utility methods for working with WSGI servers."""
 
 import os.path
-import socket
-import ssl
+import socket as socket_module
 import sys
 
-import eventlet
-import eventlet.wsgi
-import greenlet
+import cheroot.wsgi
+from futurist import DynamicThreadPoolExecutor
 from oslo_log import log as logging
 from oslo_service import service
 from oslo_utils import excutils
@@ -46,7 +44,7 @@ class Server(service.ServiceBase):
     default_pool_size = CONF.wsgi.default_pool_size
 
     def __init__(self, name, app, host='0.0.0.0', port=0, pool_size=None,
-                 protocol=eventlet.wsgi.HttpProtocol, backlog=128,
+                 protocol=None, backlog=128,
                  use_ssl=False, max_url_len=None):
         """Initialize, but do not start, a WSGI server.
 
@@ -54,174 +52,358 @@ class Server(service.ServiceBase):
         :param app: The WSGI application to serve.
         :param host: IP address to serve the application.
         :param port: Port number to server the application.
-        :param pool_size: Maximum number of eventlets to spawn concurrently.
+        :param pool_size: Maximum number of threads to spawn concurrently.
         :param backlog: Maximum number of queued connections.
         :param max_url_len: Maximum length of permitted URLs.
         :returns: None
         :raises: masakari.exception.InvalidInput
         """
-        # Allow operators to customize http requests max header line size.
-        eventlet.wsgi.MAX_HEADER_LINE = CONF.wsgi.max_header_line
         self.name = name
         self.app = app
         self._server = None
+        self._httpd = None
         self._protocol = protocol
         self.pool_size = pool_size or self.default_pool_size
-        self._pool = eventlet.GreenPool(self.pool_size)
+        self._pool = DynamicThreadPoolExecutor(max_workers=self.pool_size)
+        self._pool_shutdown = False  # Track if pool has been shutdown
         self._logger = logging.getLogger("masakari.%s.wsgi.server" % self.name)
         self._use_ssl = use_ssl
         self._max_url_len = max_url_len
 
         self.client_socket_timeout = CONF.wsgi.client_socket_timeout or None
 
+        # Store host and port - cheroot will handle socket binding
+        self.host = host
+        self.port = port
+
+        # Validate backlog parameter even though cheroot handles it
         if backlog < 1:
             raise exception.InvalidInput(
                 reason=_('The backlog must be more than 0'))
 
-        bind_addr = (host, port)
-        try:
-            info = socket.getaddrinfo(bind_addr[0],
-                                      bind_addr[1],
-                                      socket.AF_UNSPEC,
-                                      socket.SOCK_STREAM)[0]
-            family = info[0]
-            bind_addr = info[-1]
-        except Exception:
-            family = socket.AF_INET
-
-        try:
-            self._socket = eventlet.listen(bind_addr, family, backlog=backlog)
-        except EnvironmentError:
-            LOG.error("Could not bind to %(host)s:%(port)d",
-                      {'host': host, 'port': port})
-            raise
-
-        (self.host, self.port) = self._socket.getsockname()[0:2]
-        LOG.info("%(name)s listening on %(host)s:%(port)d",
+        LOG.info("%(name)s configured for %(host)s:%(port)d",
                  {'name': self.name, 'host': self.host, 'port': self.port})
+
+    @property
+    def _socket(self):
+        """Compatibility property to access cheroot's socket."""
+        if not self._httpd:
+            return None
+
+        # Try various ways to access cheroot's socket
+        socket_attrs = [
+            'socket',           # Direct socket attribute
+            'sock',            # Alternative socket name
+            '_sock',           # Private socket
+            'listener',        # Listener socket
+            'listeners'        # Multiple listeners
+        ]
+
+        for attr in socket_attrs:
+            if hasattr(self._httpd, attr):
+                sock = getattr(self._httpd, attr)
+                if sock:
+                    # For listeners (list), get the first one
+                    if isinstance(sock, list) and sock:
+                        return sock[0]
+                    return sock
+
+        # If no direct socket found, try to get it from the gateway
+        if hasattr(self._httpd, 'gateway') and self._httpd.gateway:
+            gateway = self._httpd.gateway
+            if hasattr(gateway, 'socket'):
+                return gateway.socket
+
+        return None
 
     def start(self):
         """Start serving a WSGI application.
 
         :returns: None
         """
-        # The server socket object will be closed after server exits,
-        # but the underlying file descriptor will remain open, and will
-        # give bad file descriptor error. So duplicating the socket object,
-        # to keep file descriptor usable.
+        # Recreate thread pool if it has been shutdown to allow restart
+        # ThreadPoolExecutor cannot be reused after shutdown() is called
+        try:
+            # Try to submit a dummy task to check if pool is still usable
+            self._pool.submit(lambda: None)
+        except RuntimeError:
+            # Pool has been shutdown, recreate it
+            LOG.info("Recreating thread pool for server restart")
+            self._pool = DynamicThreadPoolExecutor(
+                max_workers=self.pool_size)
+            self._pool_shutdown = False
 
-        dup_socket = self._socket.dup()
-        dup_socket.setsockopt(socket.SOL_SOCKET,
-                              socket.SO_REUSEADDR, 1)
-        # sockets can hang around forever without keepalive
-        dup_socket.setsockopt(socket.SOL_SOCKET,
-                              socket.SO_KEEPALIVE, 1)
+        try:
+            # Wrap the WSGI app with URL length checking if
+            # max_url_len is specified
+            wsgi_app = self.app
+            if self._max_url_len:
+                wsgi_app = self._create_url_length_wrapper(
+                    self.app, self._max_url_len)
 
-        # This option isn't available in the OS X version of eventlet
-        if hasattr(socket, 'TCP_KEEPIDLE'):
-            dup_socket.setsockopt(socket.IPPROTO_TCP,
-                                  socket.TCP_KEEPIDLE,
-                                  CONF.wsgi.tcp_keepidle)
-
-        if self._use_ssl:
-            try:
-                ca_file = CONF.wsgi.ssl_ca_file
-                cert_file = CONF.wsgi.ssl_cert_file
-                key_file = CONF.wsgi.ssl_key_file
-
-                if cert_file and not os.path.exists(cert_file):
-                    raise RuntimeError(
-                        _("Unable to find cert_file : %s") % cert_file)
-
-                if ca_file and not os.path.exists(ca_file):
-                    raise RuntimeError(
-                        _("Unable to find ca_file : %s") % ca_file)
-
-                if key_file and not os.path.exists(key_file):
-                    raise RuntimeError(
-                        _("Unable to find key_file : %s") % key_file)
-
-                if self._use_ssl and (not cert_file or not key_file):
-                    raise RuntimeError(
-                        _("When running server in SSL mode, you must "
-                          "specify both a cert_file and key_file "
-                          "option value in your configuration file"))
-                ssl_kwargs = {
-                    'server_side': True,
-                    'certfile': cert_file,
-                    'keyfile': key_file,
-                    'cert_reqs': ssl.CERT_NONE,
-                }
-
-                if CONF.wsgi.ssl_ca_file:
-                    ssl_kwargs['ca_certs'] = ca_file
-                    ssl_kwargs['cert_reqs'] = ssl.CERT_REQUIRED
-
-                dup_socket = eventlet.wrap_ssl(dup_socket,
-                                               **ssl_kwargs)
-            except Exception:
-                with excutils.save_and_reraise_exception():
-                    LOG.error("Failed to start %(name)s on %(host)s"
-                              ":%(port)d with SSL support",
-                              {'name': self.name, 'host': self.host,
-                               'port': self.port})
-
-        wsgi_kwargs = {
-            'func': eventlet.wsgi.server,
-            'sock': dup_socket,
-            'site': self.app,
-            'protocol': self._protocol,
-            'custom_pool': self._pool,
-            'log': self._logger,
-            'log_format': CONF.wsgi.wsgi_log_format,
-            'debug': False,
-            'keepalive': CONF.wsgi.keep_alive,
-            'socket_timeout': self.client_socket_timeout
+            # Create cheroot WSGI server with proper configuration
+            server_kwargs = {
+                'bind_addr': (self.host, self.port),
+                'wsgi_app': wsgi_app,
+                'numthreads': self.pool_size,
+                'server_name': self.name,
+                'timeout': self.client_socket_timeout or 10,
+                'shutdown_timeout': 1  # Faster shutdown for tests
             }
+            self._httpd = cheroot.wsgi.Server(**server_kwargs)
 
-        if self._max_url_len:
-            wsgi_kwargs['url_length_limit'] = self._max_url_len
+            # Configure socket options to match original implementation
+            self._configure_socket_options()
 
-        self._server = utils.spawn(**wsgi_kwargs)
+            # Configure SSL if enabled
+            if self._use_ssl:
+                self._configure_ssl()
+
+            LOG.info("Starting cheroot WSGI server on %(host)s:%(port)d",
+                    {'host': self.host, 'port': self.port})
+
+            # Start the server in a background thread
+            self._server = utils.spawn(self._httpd.start)
+
+            # Update port if it was set to 0 (random port)
+            if self.port == 0:
+                # Wait for cheroot to bind and get the actual port
+                import time
+                max_attempts = 50  # 5 seconds max
+                for attempt in range(max_attempts):
+                    if (hasattr(self._httpd, 'bind_addr') and
+                        self._httpd.bind_addr and
+                            self._httpd.bind_addr[1] != 0):
+                        self.port = self._httpd.bind_addr[1]
+                        LOG.info("Server bound to random port: %d", self.port)
+                        break
+                    time.sleep(0.1)
+                else:
+                    LOG.warning(
+                        "Could not determine bound port after 5 seconds")
+
+        except Exception as e:
+            LOG.error(
+                "Failed to start %(name)s on %(host)s:%(port)d: %(error)s",
+                {'name': self.name, 'host': self.host,
+                 'port': self.port, 'error': e})
+            raise
+
+    def _configure_ssl(self):
+        """Configure SSL for cheroot WSGI server."""
+        ca_file = CONF.wsgi.ssl_ca_file
+        cert_file = CONF.wsgi.ssl_cert_file
+        key_file = CONF.wsgi.ssl_key_file
+
+        # Validate SSL files exist
+        if cert_file and not os.path.exists(cert_file):
+            raise RuntimeError(
+                _("Unable to find cert_file : %s") % cert_file)
+
+        if ca_file and not os.path.exists(ca_file):
+            raise RuntimeError(
+                _("Unable to find ca_file : %s") % ca_file)
+
+        if key_file and not os.path.exists(key_file):
+            raise RuntimeError(
+                _("Unable to find key_file : %s") % key_file)
+
+        if self._use_ssl and (not cert_file or not key_file):
+            raise RuntimeError(
+                _("When running server in SSL mode, you must "
+                  "specify both a cert_file and key_file "
+                  "option value in your configuration file"))
+
+        try:
+            # Configure cheroot's built-in SSL support
+            import cheroot.ssl.builtin
+            ssl_adapter = cheroot.ssl.builtin.BuiltinSSLAdapter(
+                certificate=cert_file,
+                private_key=key_file
+            )
+
+            # Add CA file if specified
+            if ca_file:
+                ssl_adapter.certificate_chain = ca_file
+
+            self._httpd.ssl_adapter = ssl_adapter
+            LOG.info("SSL configured for %(name)s with cert: %(cert)s",
+                    {'name': self.name, 'cert': cert_file})
+
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.error("Failed to configure SSL for %(name)s on %(host)s"
+                          ":%(port)d",
+                          {'name': self.name, 'host': self.host,
+                           'port': self.port})
+
+    def _configure_socket_options(self):
+        """Configure socket options for cheroot WSGI server."""
+        if not self._httpd:
+            return
+
+        def configure_socket(sock):
+            """Configure a socket with the required options."""
+            if not sock:
+                return
+
+            try:
+                # Set SO_REUSEADDR (this is typically
+                # set by cheroot by default)
+                sock.setsockopt(
+                    socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+
+                # Set SO_KEEPALIVE
+                sock.setsockopt(
+                    socket_module.SOL_SOCKET, socket_module.SO_KEEPALIVE, 1)
+
+                # Set TCP_KEEPIDLE if available and configured
+                if (hasattr(socket_module, 'TCP_KEEPIDLE') and
+                    hasattr(CONF.wsgi, 'tcp_keepidle') and
+                        CONF.wsgi.tcp_keepidle):
+                    sock.setsockopt(socket_module.IPPROTO_TCP,
+                                    socket_module.TCP_KEEPIDLE,
+                                    CONF.wsgi.tcp_keepidle)
+
+                LOG.debug("Socket options configured for %s", self.name)
+
+            except Exception as e:
+                LOG.debug("Could not configure socket options: %s", e)
+
+        # Configure socket options using cheroot's prepare method
+        original_prepare = getattr(self._httpd, 'prepare', None)
+        if original_prepare:
+            def prepare_with_socket_options():
+                original_prepare()
+                # Configure the main socket after it's created
+                if hasattr(self._httpd, 'socket') and self._httpd.socket:
+                    configure_socket(self._httpd.socket)
+                elif hasattr(self._httpd, 'bind_addr'):
+                    # Try to find the socket after prepare
+                    for attr in ['socket', 'sock', '_sock', 'listener']:
+                        if hasattr(self._httpd, attr):
+                            sock = getattr(self._httpd, attr)
+                            if sock:
+                                configure_socket(sock)
+                                break
+
+            self._httpd.prepare = prepare_with_socket_options
+
+    def _create_url_length_wrapper(self, app, max_url_len):
+        """Create a WSGI middleware that enforces URL length limits."""
+        def url_length_middleware(environ, start_response):
+            # Get the full URL from the request
+            path_info = environ.get('PATH_INFO', '')
+            query_string = environ.get('QUERY_STRING', '')
+
+            # Construct the full URL path
+            if query_string:
+                full_url = path_info + '?' + query_string
+            else:
+                full_url = path_info
+
+            # Check if URL exceeds the maximum length
+            if len(full_url) > max_url_len:
+                # Return 414 URI Too Large
+                status = '414 URI Too Large'
+                headers = [('Content-Type', 'text/plain')]
+                start_response(status, headers)
+                return [b'URI Too Large']
+
+            # URL is acceptable, pass through to the actual app
+            if app:
+                return app(environ, start_response)
+            else:
+                # No app provided, return a simple response
+                status = '200 OK'
+                headers = [('Content-Type', 'text/plain')]
+                start_response(status, headers)
+                return [b'OK']
+
+        return url_length_middleware
 
     def reset(self):
-        """Reset server greenpool size to default.
+        """Reset server thread pool size to default.
 
         :returns: None
 
         """
-        self._pool.resize(self.pool_size)
+        LOG.info("Resetting WSGI thread pool size to default: %d",
+                self.default_pool_size)
+        # Shut down the old pool and create a new one with the default size
+        if not self._pool_shutdown:
+            self._pool.shutdown(wait=False)
+        self._pool = DynamicThreadPoolExecutor(
+            max_workers=self.default_pool_size)
+        self._pool_shutdown = False
+        self.pool_size = self.default_pool_size
 
     def stop(self):
         """Stop this server.
 
-        This is not a very nice action, as currently the method by which a
-        server is stopped is by killing its eventlet.
+        This stops the WSGI server by shutting down the HTTP server.
 
         :returns: None
 
         """
         LOG.info("Stopping WSGI server.")
 
-        if self._server is not None:
-            # Resize pool to stop new requests from being processed
-            self._pool.resize(0)
-            self._server.kill()
+        if self._httpd is not None:
+            # Cheroot provides clean shutdown
+            self._httpd.stop()
+
+            # Force aggressive shutdown for tests
+            try:
+                # Force shutdown the bus system
+                if hasattr(self._httpd, 'bus') and self._httpd.bus:
+                    self._httpd.bus.exit()
+
+                # Force shutdown any remaining server components
+                if hasattr(self._httpd, '_server') and self._httpd._server:
+                    self._httpd._server.shutdown()
+
+                # Clear the server reference
+                self._httpd = None
+
+            except Exception as e:
+                LOG.debug("Exception during aggressive server shutdown: %s", e)
+
+        if self._server is not None and not self._pool_shutdown:
+            # Shutdown pool to stop new requests from being processed
+            self._pool.shutdown(wait=False)
+            self._pool_shutdown = True
 
     def wait(self):
         """Block, until the server has stopped.
 
-        Waits on the server's eventlet to finish, then returns.
+        Waits on the server thread to finish, then returns.
 
         :returns: None
 
         """
         try:
             if self._server is not None:
-                self._pool.waitall()
-                self._server.wait()
-        except greenlet.GreenletExit:
-            LOG.info("WSGI server has stopped.")
+                self._server.result()
+
+                # Force shutdown the pool if not already shutdown
+                if not self._pool_shutdown:
+                    self._pool.shutdown(wait=False)
+                    self._pool_shutdown = True
+
+        except Exception as e:
+            LOG.info("WSGI server has stopped: %s", e)
+        finally:
+            # Clean up references aggressively
+            if self._httpd is not None:
+                try:
+                    # Final cleanup attempt
+                    if hasattr(self._httpd, 'bus') and self._httpd.bus:
+                        self._httpd.bus.exit()
+                except Exception:
+                    pass
+
+            self._httpd = None
+            self._server = None
 
 
 class Request(webob.Request):
