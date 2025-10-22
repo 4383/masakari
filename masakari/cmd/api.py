@@ -31,6 +31,7 @@ from masakari import exception
 from masakari import objects
 from masakari import rpc
 from masakari import service
+from masakari import service_backend
 from masakari import version
 
 
@@ -50,6 +51,10 @@ def main():
     api_config.parse_args(sys.argv)
     logging.setup(CONF, "masakari")
     log = logging.getLogger(__name__)
+
+    # Initialize oslo.service threading backend
+    service_backend.initialize_service_backend()
+
     objects.register_all()
 
     launcher = service.process_launcher()
@@ -70,6 +75,9 @@ def initialize_application():
     conf_files = _get_config_files()
     api_config.parse_args([], default_config_files=conf_files)
     logging.setup(CONF, "masakari")
+
+    # Initialize oslo.service threading backend
+    service_backend.initialize_service_backend()
 
     objects.register_all()
     CONF(sys.argv[1:], project='masakari', version=version.version_string())

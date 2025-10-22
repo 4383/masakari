@@ -15,13 +15,10 @@
 """Utility methods for working with WSGI servers."""
 
 import os.path
-import socket
-import ssl
 import sys
 
-import eventlet
-import eventlet.wsgi
-import greenlet
+import cheroot.wsgi
+from futurist import DynamicThreadPoolExecutor
 from oslo_log import log as logging
 from oslo_service import service
 from oslo_utils import excutils
@@ -46,7 +43,7 @@ class Server(service.ServiceBase):
     default_pool_size = CONF.wsgi.default_pool_size
 
     def __init__(self, name, app, host='0.0.0.0', port=0, pool_size=None,
-                 protocol=eventlet.wsgi.HttpProtocol, backlog=128,
+                 protocol=None, backlog=128,
                  use_ssl=False, max_url_len=None):
         """Initialize, but do not start, a WSGI server.
 
@@ -54,50 +51,35 @@ class Server(service.ServiceBase):
         :param app: The WSGI application to serve.
         :param host: IP address to serve the application.
         :param port: Port number to server the application.
-        :param pool_size: Maximum number of eventlets to spawn concurrently.
+        :param pool_size: Maximum number of threads to spawn concurrently.
         :param backlog: Maximum number of queued connections.
         :param max_url_len: Maximum length of permitted URLs.
         :returns: None
         :raises: masakari.exception.InvalidInput
         """
-        # Allow operators to customize http requests max header line size.
-        eventlet.wsgi.MAX_HEADER_LINE = CONF.wsgi.max_header_line
         self.name = name
         self.app = app
         self._server = None
+        self._httpd = None
         self._protocol = protocol
         self.pool_size = pool_size or self.default_pool_size
-        self._pool = eventlet.GreenPool(self.pool_size)
+        self._pool = DynamicThreadPoolExecutor(max_workers=self.pool_size)
         self._logger = logging.getLogger("masakari.%s.wsgi.server" % self.name)
         self._use_ssl = use_ssl
         self._max_url_len = max_url_len
 
         self.client_socket_timeout = CONF.wsgi.client_socket_timeout or None
 
+        # Store host and port - cheroot will handle socket binding
+        self.host = host
+        self.port = port
+
+        # Validate backlog parameter even though cheroot handles it
         if backlog < 1:
             raise exception.InvalidInput(
                 reason=_('The backlog must be more than 0'))
 
-        bind_addr = (host, port)
-        try:
-            info = socket.getaddrinfo(bind_addr[0],
-                                      bind_addr[1],
-                                      socket.AF_UNSPEC,
-                                      socket.SOCK_STREAM)[0]
-            family = info[0]
-            bind_addr = info[-1]
-        except Exception:
-            family = socket.AF_INET
-
-        try:
-            self._socket = eventlet.listen(bind_addr, family, backlog=backlog)
-        except EnvironmentError:
-            LOG.error("Could not bind to %(host)s:%(port)d",
-                      {'host': host, 'port': port})
-            raise
-
-        (self.host, self.port) = self._socket.getsockname()[0:2]
-        LOG.info("%(name)s listening on %(host)s:%(port)d",
+        LOG.info("%(name)s configured for %(host)s:%(port)d",
                  {'name': self.name, 'host': self.host, 'port': self.port})
 
     def start(self):
@@ -105,123 +87,144 @@ class Server(service.ServiceBase):
 
         :returns: None
         """
-        # The server socket object will be closed after server exits,
-        # but the underlying file descriptor will remain open, and will
-        # give bad file descriptor error. So duplicating the socket object,
-        # to keep file descriptor usable.
+        # Recreate thread pool if it has been shutdown to allow restart
+        # ThreadPoolExecutor cannot be reused after shutdown() is called
+        try:
+            # Try to submit a dummy task to check if pool is still usable
+            self._pool.submit(lambda: None)
+        except RuntimeError:
+            # Pool has been shutdown, recreate it
+            LOG.info("Recreating thread pool for server restart")
+            self._pool = DynamicThreadPoolExecutor(
+                max_workers=self.pool_size)
 
-        dup_socket = self._socket.dup()
-        dup_socket.setsockopt(socket.SOL_SOCKET,
-                              socket.SO_REUSEADDR, 1)
-        # sockets can hang around forever without keepalive
-        dup_socket.setsockopt(socket.SOL_SOCKET,
-                              socket.SO_KEEPALIVE, 1)
+        try:
+            # Create cheroot WSGI server
+            self._httpd = cheroot.wsgi.Server(
+                bind_addr=(self.host, self.port),
+                wsgi_app=self.app,
+                numthreads=self.pool_size,
+                server_name=self.name,
+                timeout=self.client_socket_timeout or 10,
+                shutdown_timeout=5
+            )
 
-        # This option isn't available in the OS X version of eventlet
-        if hasattr(socket, 'TCP_KEEPIDLE'):
-            dup_socket.setsockopt(socket.IPPROTO_TCP,
-                                  socket.TCP_KEEPIDLE,
-                                  CONF.wsgi.tcp_keepidle)
+            # Configure SSL if enabled
+            if self._use_ssl:
+                self._configure_ssl()
 
-        if self._use_ssl:
-            try:
-                ca_file = CONF.wsgi.ssl_ca_file
-                cert_file = CONF.wsgi.ssl_cert_file
-                key_file = CONF.wsgi.ssl_key_file
+            LOG.info("Starting cheroot WSGI server on %(host)s:%(port)d",
+                    {'host': self.host, 'port': self.port})
 
-                if cert_file and not os.path.exists(cert_file):
-                    raise RuntimeError(
-                        _("Unable to find cert_file : %s") % cert_file)
+            # Start the server in a background thread
+            self._server = utils.spawn(self._httpd.start)
 
-                if ca_file and not os.path.exists(ca_file):
-                    raise RuntimeError(
-                        _("Unable to find ca_file : %s") % ca_file)
+        except Exception as e:
+            LOG.error(
+                "Failed to start %(name)s on %(host)s:%(port)d: %(error)s",
+                {'name': self.name, 'host': self.host,
+                 'port': self.port, 'error': e})
+            raise
 
-                if key_file and not os.path.exists(key_file):
-                    raise RuntimeError(
-                        _("Unable to find key_file : %s") % key_file)
+    def _configure_ssl(self):
+        """Configure SSL for cheroot WSGI server."""
+        ca_file = CONF.wsgi.ssl_ca_file
+        cert_file = CONF.wsgi.ssl_cert_file
+        key_file = CONF.wsgi.ssl_key_file
 
-                if self._use_ssl and (not cert_file or not key_file):
-                    raise RuntimeError(
-                        _("When running server in SSL mode, you must "
-                          "specify both a cert_file and key_file "
-                          "option value in your configuration file"))
-                ssl_kwargs = {
-                    'server_side': True,
-                    'certfile': cert_file,
-                    'keyfile': key_file,
-                    'cert_reqs': ssl.CERT_NONE,
-                }
+        # Validate SSL files exist
+        if cert_file and not os.path.exists(cert_file):
+            raise RuntimeError(
+                _("Unable to find cert_file : %s") % cert_file)
 
-                if CONF.wsgi.ssl_ca_file:
-                    ssl_kwargs['ca_certs'] = ca_file
-                    ssl_kwargs['cert_reqs'] = ssl.CERT_REQUIRED
+        if ca_file and not os.path.exists(ca_file):
+            raise RuntimeError(
+                _("Unable to find ca_file : %s") % ca_file)
 
-                dup_socket = eventlet.wrap_ssl(dup_socket,
-                                               **ssl_kwargs)
-            except Exception:
-                with excutils.save_and_reraise_exception():
-                    LOG.error("Failed to start %(name)s on %(host)s"
-                              ":%(port)d with SSL support",
-                              {'name': self.name, 'host': self.host,
-                               'port': self.port})
+        if key_file and not os.path.exists(key_file):
+            raise RuntimeError(
+                _("Unable to find key_file : %s") % key_file)
 
-        wsgi_kwargs = {
-            'func': eventlet.wsgi.server,
-            'sock': dup_socket,
-            'site': self.app,
-            'protocol': self._protocol,
-            'custom_pool': self._pool,
-            'log': self._logger,
-            'log_format': CONF.wsgi.wsgi_log_format,
-            'debug': False,
-            'keepalive': CONF.wsgi.keep_alive,
-            'socket_timeout': self.client_socket_timeout
-            }
+        if self._use_ssl and (not cert_file or not key_file):
+            raise RuntimeError(
+                _("When running server in SSL mode, you must "
+                  "specify both a cert_file and key_file "
+                  "option value in your configuration file"))
 
-        if self._max_url_len:
-            wsgi_kwargs['url_length_limit'] = self._max_url_len
+        try:
+            # Configure cheroot's built-in SSL support
+            import cheroot.ssl.builtin
+            ssl_adapter = cheroot.ssl.builtin.BuiltinSSLAdapter(
+                certificate=cert_file,
+                private_key=key_file
+            )
 
-        self._server = utils.spawn(**wsgi_kwargs)
+            # Add CA file if specified
+            if ca_file:
+                ssl_adapter.certificate_chain = ca_file
+
+            self._httpd.ssl_adapter = ssl_adapter
+            LOG.info("SSL configured for %(name)s with cert: %(cert)s",
+                    {'name': self.name, 'cert': cert_file})
+
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.error("Failed to configure SSL for %(name)s on %(host)s"
+                          ":%(port)d",
+                          {'name': self.name, 'host': self.host,
+                           'port': self.port})
 
     def reset(self):
-        """Reset server greenpool size to default.
+        """Reset server thread pool size to default.
 
         :returns: None
 
         """
-        self._pool.resize(self.pool_size)
+        LOG.info("Resetting WSGI thread pool size to default: %d",
+                self.default_pool_size)
+        # Shut down the old pool and create a new one with the default size
+        self._pool.shutdown(wait=False)
+        self._pool = DynamicThreadPoolExecutor(
+            max_workers=self.default_pool_size)
+        self.pool_size = self.default_pool_size
 
     def stop(self):
         """Stop this server.
 
-        This is not a very nice action, as currently the method by which a
-        server is stopped is by killing its eventlet.
+        This stops the WSGI server by shutting down the HTTP server.
 
         :returns: None
 
         """
         LOG.info("Stopping WSGI server.")
 
+        if self._httpd is not None:
+            # Cheroot provides clean shutdown
+            self._httpd.stop()
+
         if self._server is not None:
-            # Resize pool to stop new requests from being processed
-            self._pool.resize(0)
-            self._server.kill()
+            # Shutdown pool to stop new requests from being processed
+            self._pool.shutdown(wait=False)
 
     def wait(self):
         """Block, until the server has stopped.
 
-        Waits on the server's eventlet to finish, then returns.
+        Waits on the server thread to finish, then returns.
 
         :returns: None
 
         """
         try:
             if self._server is not None:
-                self._pool.waitall()
-                self._server.wait()
-        except greenlet.GreenletExit:
-            LOG.info("WSGI server has stopped.")
+                # Wait for the server future to complete
+                self._server.result()
+                self._pool.shutdown(wait=True)
+        except Exception as e:
+            LOG.info("WSGI server has stopped: %s", e)
+        finally:
+            # Clean up references
+            self._httpd = None
+            self._server = None
 
 
 class Request(webob.Request):
