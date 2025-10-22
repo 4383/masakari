@@ -19,31 +19,6 @@ base_options = [
     cfg.StrOpt(
         'tempdir',
         help='Explicitly specify the temporary working directory.'),
-    cfg.BoolOpt(
-        'monkey_patch',
-        default=False,
-        help="""
-Determine if monkey patching should be applied.
-
-Related options:
-
-* ``monkey_patch_modules``: This must have values set for this option to have
-  any effect
-"""),
-    cfg.ListOpt(
-        'monkey_patch_modules',
-        default=['masakari.api:masakari.cmd'],
-        help="""
-List of modules/decorators to monkey patch.
-
-This option allows you to patch a decorator for all functions in specified
-modules.
-
-Related options:
-
-* ``monkey_patch``: This must be set to ``True`` for this option to
-  have any effect
-"""),
 ]
 
 

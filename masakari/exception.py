@@ -344,6 +344,12 @@ class ProcessRecoveryFailureException(MasakariException):
     msg_fmt = _('Failed to execute process recovery workflow.')
 
 
+class EvacuationFailureThresholdExceeded(MasakariException):
+    msg_fmt = _('Evacuation failure threshold exceeded: %(failed)d out of '
+                '%(total)d evacuations failed (%(failure_rate).1f%%), '
+                'exceeding threshold of %(threshold).1f%%')
+
+
 class DBNotAllowed(MasakariException):
     msg_fmt = _('%(binary)s attempted direct database access which is '
                 'not allowed by policy')
