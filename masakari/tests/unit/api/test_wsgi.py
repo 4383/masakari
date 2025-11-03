@@ -32,7 +32,6 @@ import masakari.exception
 from masakari.tests.unit import base
 from masakari.tests.unit import utils
 from masakari import utils as masakari_utils
-from masakari import test_cleanup_utils
 
 SSL_CERT_DIR = os.path.normpath(os.path.join(
                                 os.path.dirname(os.path.abspath(__file__)),
@@ -104,8 +103,6 @@ class TestWSGIServer(base.NoDBTestCase):
 
     def tearDown(self):
         super(TestWSGIServer, self).tearDown()
-        # Aggressive cleanup to prevent test hangs
-        test_cleanup_utils.cleanup_after_wsgi_tests()
 
     def test_no_app(self):
         server = wsgi.Server("test_app", None)
