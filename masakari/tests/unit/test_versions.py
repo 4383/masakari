@@ -19,10 +19,16 @@ from oslo_config import cfg
 
 from masakari.tests.unit import base
 from masakari import version
+from masakari import test_cleanup_utils
 
 
 class VersionTestCase(base.NoDBTestCase):
     """Test cases for Versions code."""
+
+    def tearDown(self):
+        super(VersionTestCase, self).tearDown()
+        # Aggressive cleanup to prevent test hangs after versions tests
+        test_cleanup_utils.aggressive_cleanup()
 
     def test_version_string_with_package_is_good(self):
         """Ensure uninstalled code get version string."""

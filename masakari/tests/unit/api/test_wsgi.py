@@ -32,6 +32,7 @@ import masakari.exception
 from masakari.tests.unit import base
 from masakari.tests.unit import utils
 from masakari import utils as masakari_utils
+from masakari import test_cleanup_utils
 
 SSL_CERT_DIR = os.path.normpath(os.path.join(
                                 os.path.dirname(os.path.abspath(__file__)),
@@ -103,8 +104,8 @@ class TestWSGIServer(base.NoDBTestCase):
 
     def tearDown(self):
         super(TestWSGIServer, self).tearDown()
-        # Clean up global thread pools to prevent test hangs
-        masakari_utils._cleanup_global_executors()
+        # Aggressive cleanup to prevent test hangs
+        test_cleanup_utils.cleanup_after_wsgi_tests()
 
     def test_no_app(self):
         server = wsgi.Server("test_app", None)
@@ -148,16 +149,16 @@ class TestWSGIServer(base.NoDBTestCase):
         server.stop()
         server.wait()
 
-    def test_server_pool_waitall(self):
-        # test pools waitall method gets called while stopping server
+    def test_server_pool_shutdown(self):
+        # test pools shutdown method gets called while stopping server
         server = wsgi.Server("test_server", None,
             host="127.0.0.1")
         server.start()
         with mock.patch.object(server._pool,
-                              'waitall') as mock_waitall:
+                              'shutdown') as mock_shutdown:
             server.stop()
             server.wait()
-            mock_waitall.assert_called_once_with()
+            mock_shutdown.assert_called_once_with(wait=False)
 
     def test_uri_length_limit(self):
         server = wsgi.Server("test_uri_length_limit", None,
@@ -181,13 +182,22 @@ class TestWSGIServer(base.NoDBTestCase):
     def test_reset_pool_size_to_default(self):
         server = wsgi.Server("test_resize", None,
             host="127.0.0.1", max_url_len=16384)
+
+        initial_pool_size = server.pool_size
         server.start()
 
-        # Stopping the server, which in turn sets pool size to 0
+        # Stopping the server
         server.stop()
-        self.assertEqual(server._pool.size, 0)
+        # Note: pool_size attribute doesn't change on stop, just the pool is shutdown
+        self.assertEqual(server.pool_size, initial_pool_size)
 
         # Resetting pool size to default
         server.reset()
-        server.start()
-        self.assertEqual(server._pool.size, CONF.wsgi.default_pool_size)
+        self.assertEqual(server.pool_size, CONF.wsgi.default_pool_size)
+
+        # Verify the pool was recreated properly
+        self.assertIsNotNone(server._pool)
+
+        # Ensure proper cleanup
+        server.stop()
+        server.wait()

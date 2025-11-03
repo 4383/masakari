@@ -30,6 +30,7 @@ from masakari import service
 from masakari import service_backend
 from masakari.tests.unit import base
 from masakari import utils
+from masakari import test_cleanup_utils
 
 CONF = cfg.CONF
 
@@ -122,8 +123,8 @@ class TestWSGIService(base.NoDBTestCase):
 
     def tearDown(self):
         super(TestWSGIService, self).tearDown()
-        # Clean up global thread pools to prevent test hangs
-        utils._cleanup_global_executors()
+        # Aggressive cleanup to prevent test hangs
+        test_cleanup_utils.cleanup_after_service_tests()
 
     def test_workers_set_default(self):
         test_service = service.WSGIService("masakari_api")
