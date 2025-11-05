@@ -104,7 +104,8 @@ def _cleanup_global_executors():
                     # Try graceful shutdown first
                     executor.shutdown(wait=False)
 
-                    # Force terminate any remaining workers for DynamicThreadPoolExecutor
+                    # Force terminate any remaining workers for
+                    # DynamicThreadPoolExecutor
                     if hasattr(executor, '_workers'):
                         for worker in list(getattr(executor, '_workers', [])):
                             try:

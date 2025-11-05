@@ -31,7 +31,6 @@ from masakari.api import wsgi
 import masakari.exception
 from masakari.tests.unit import base
 from masakari.tests.unit import utils
-from masakari import utils as masakari_utils
 
 SSL_CERT_DIR = os.path.normpath(os.path.join(
                                 os.path.dirname(os.path.abspath(__file__)),
@@ -185,7 +184,8 @@ class TestWSGIServer(base.NoDBTestCase):
 
         # Stopping the server
         server.stop()
-        # Note: pool_size attribute doesn't change on stop, just the pool is shutdown
+        # Note: pool_size attribute doesn't change on stop,
+        # just the pool is shutdown
         self.assertEqual(server.pool_size, initial_pool_size)
 
         # Resetting pool size to default

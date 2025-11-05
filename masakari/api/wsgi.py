@@ -15,6 +15,7 @@
 """Utility methods for working with WSGI servers."""
 
 import os.path
+import socket as socket_module
 import sys
 
 import cheroot.wsgi
@@ -133,28 +134,18 @@ class Server(service.ServiceBase):
             self._pool_shutdown = False
 
         try:
-            # Reduce thread count for tests to prevent thread explosion
-            # Check if we're in a test environment
-            test_mode = (
-                'pytest' in self.name.lower() or
-                'test' in self.name.lower() or
-                any('test' in str(frame.filename).lower()
-                    for frame in __import__('inspect').stack())
-            )
-
-            # Use fewer threads in test mode
-            num_threads = min(self.pool_size, 4) if test_mode else self.pool_size
-
-            # Wrap the WSGI app with URL length checking if max_url_len is specified
+            # Wrap the WSGI app with URL length checking if
+            # max_url_len is specified
             wsgi_app = self.app
             if self._max_url_len:
-                wsgi_app = self._create_url_length_wrapper(self.app, self._max_url_len)
+                wsgi_app = self._create_url_length_wrapper(
+                    self.app, self._max_url_len)
 
             # Create cheroot WSGI server with proper configuration
             server_kwargs = {
                 'bind_addr': (self.host, self.port),
                 'wsgi_app': wsgi_app,
-                'numthreads': num_threads,
+                'numthreads': self.pool_size,
                 'server_name': self.name,
                 'timeout': self.client_socket_timeout or 10,
                 'shutdown_timeout': 1  # Faster shutdown for tests
@@ -182,13 +173,14 @@ class Server(service.ServiceBase):
                 for attempt in range(max_attempts):
                     if (hasattr(self._httpd, 'bind_addr') and
                         self._httpd.bind_addr and
-                        self._httpd.bind_addr[1] != 0):
+                            self._httpd.bind_addr[1] != 0):
                         self.port = self._httpd.bind_addr[1]
                         LOG.info("Server bound to random port: %d", self.port)
                         break
                     time.sleep(0.1)
                 else:
-                    LOG.warning("Could not determine bound port after 5 seconds")
+                    LOG.warning(
+                        "Could not determine bound port after 5 seconds")
 
         except Exception as e:
             LOG.error(
@@ -255,22 +247,23 @@ class Server(service.ServiceBase):
             if not sock:
                 return
 
-            import socket as socket_module
-
             try:
-                # Set SO_REUSEADDR (this is typically set by cheroot by default)
-                sock.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+                # Set SO_REUSEADDR (this is typically
+                # set by cheroot by default)
+                sock.setsockopt(
+                    socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
 
                 # Set SO_KEEPALIVE
-                sock.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_KEEPALIVE, 1)
+                sock.setsockopt(
+                    socket_module.SOL_SOCKET, socket_module.SO_KEEPALIVE, 1)
 
                 # Set TCP_KEEPIDLE if available and configured
                 if (hasattr(socket_module, 'TCP_KEEPIDLE') and
                     hasattr(CONF.wsgi, 'tcp_keepidle') and
-                    CONF.wsgi.tcp_keepidle):
+                        CONF.wsgi.tcp_keepidle):
                     sock.setsockopt(socket_module.IPPROTO_TCP,
-                                   socket_module.TCP_KEEPIDLE,
-                                   CONF.wsgi.tcp_keepidle)
+                                    socket_module.TCP_KEEPIDLE,
+                                    CONF.wsgi.tcp_keepidle)
 
                 LOG.debug("Socket options configured for %s", self.name)
 
@@ -390,14 +383,7 @@ class Server(service.ServiceBase):
         """
         try:
             if self._server is not None:
-                # Wait for the server future to complete with timeout for tests
-                try:
-                    # Use shorter timeout in test environments
-                    timeout = 2 if any('test' in str(frame.filename).lower()
-                                     for frame in __import__('inspect').stack()) else None
-                    self._server.result(timeout=timeout)
-                except Exception:
-                    LOG.debug("Server shutdown timeout, forcing cleanup")
+                self._server.result()
 
                 # Force shutdown the pool if not already shutdown
                 if not self._pool_shutdown:

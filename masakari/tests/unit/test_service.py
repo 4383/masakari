@@ -29,7 +29,6 @@ from masakari import rpc
 from masakari import service
 from masakari import service_backend
 from masakari.tests.unit import base
-from masakari import utils
 
 CONF = cfg.CONF
 
