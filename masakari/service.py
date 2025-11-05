@@ -33,6 +33,7 @@ from masakari import exception
 from masakari.i18n import _
 from masakari.objects import base as objects_base
 from masakari import rpc
+from masakari import service_backend
 from masakari import utils
 from masakari import version
 
@@ -270,7 +271,10 @@ class WSGIService(service.Service):
 
 
 def process_launcher():
-    return service.ProcessLauncher(CONF, restart_method='mutate')
+    """Get a ProcessLauncher using oslo.service threading backend."""
+    service_backend.initialize_service_backend()
+    ProcessLauncher = service_backend.get_process_launcher()
+    return ProcessLauncher(CONF, restart_method='mutate')
 
 
 # NOTE: the global launcher is to maintain the existing
@@ -284,8 +288,7 @@ def serve(server, workers=None):
     if _launcher:
         raise RuntimeError(_('serve() can only be called once'))
 
-    _launcher = service.launch(CONF, server, workers=workers,
-                               restart_method='mutate')
+    _launcher = service_backend.launch_service(CONF, server, workers=workers)
 
 
 def wait():

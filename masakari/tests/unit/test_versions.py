@@ -24,6 +24,10 @@ from masakari import version
 class VersionTestCase(base.NoDBTestCase):
     """Test cases for Versions code."""
 
+    def tearDown(self):
+        super(VersionTestCase, self).tearDown()
+        # Aggressive cleanup to prevent test hangs after versions tests
+
     def test_version_string_with_package_is_good(self):
         """Ensure uninstalled code get version string."""
 

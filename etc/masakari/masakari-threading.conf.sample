@@ -1,0 +1,103 @@
+# Sample configuration for Masakari threading
+# This file demonstrates configuration options for the native
+# Python threading implementation.
+
+[DEFAULT]
+
+# Size of the thread pool for general async operations
+# This controls the number of threads available for general
+# utility operations like utils.spawn()
+# Minimum value: 1
+executor_thread_pool_size = 64
+
+# Size of the thread pool for notification processing
+# This controls the number of threads dedicated to processing
+# failure notifications using futurist's DynamicThreadPoolExecutor
+# Minimum value: 1
+notification_thread_pool_size = 32
+
+# Size of the thread pool for driver operations
+# This controls the number of threads dedicated to executing
+# recovery drivers (host, instance, process failure workflows)
+# Minimum value: 1
+driver_thread_pool_size = 16
+
+[wsgi]
+# WSGI server configuration for threading mode
+
+# Maximum number of threads to spawn concurrently for HTTP requests
+# This replaces the eventlet pool size and controls how many
+# concurrent HTTP requests can be handled
+default_pool_size = 1000
+
+# Client socket timeout in seconds
+# How long to wait for client connections before timing out
+client_socket_timeout = 900
+
+# TCP keep-alive idle time
+# Time before sending keep-alive probes on idle connections
+tcp_keepidle = 600
+
+# Enable HTTP keep-alive connections
+keep_alive = True
+
+# WSGI log format
+wsgi_log_format = %(client_ip)s "%(request_line)s" status: %(status_code)s len: %(body_length)s time: %(wall_seconds).7f
+
+# Maximum header line size (bytes)
+# Note: This was previously controlled by eventlet.wsgi.MAX_HEADER_LINE
+# Now handled by the underlying WSGI server implementation
+max_header_line = 16384
+
+# SSL Configuration (when use_ssl = True)
+ssl_ca_file = /path/to/ca.pem
+ssl_cert_file = /path/to/cert.pem
+ssl_key_file = /path/to/key.pem
+
+[service]
+# Oslo.service threading backend configuration
+
+# Number of worker processes for multi-processing
+# When using threading backend, each worker process will use
+# native threading for concurrency within the process
+api_workers = 4
+engine_workers = 1
+
+# Periodic task configuration
+periodic_enable = True
+periodic_fuzzy_delay = 60
+periodic_interval_max = 60
+
+[coordination]
+# Coordination backend for distributed operation
+# Example with etcd3+http backend
+backend_url = etcd3+http://127.0.0.1:2379
+
+# Threading Configuration Notes:
+# ==============================
+#
+# Oslo.service Backend:
+#    Masakari uses oslo.service's threading backend for native Python
+#    threading instead of eventlet green threads. This is automatically
+#    initialized at service startup.
+#
+# 1. Thread pool sizes can be tuned based on workload:
+#    - notification_thread_pool_size: For handling failure notifications
+#    - driver_thread_pool_size: For recovery workflow execution
+#    - executor_thread_pool_size: For general async operations
+#
+# 2. WSGI server uses native Python threading:
+#    - Better CPU utilization for compute-bound tasks
+#    - Standard socket and SSL handling
+#    - Compatible with all WSGI middleware
+#
+# 3. Oslo.service uses threading throughout:
+#    - Periodic tasks run in dedicated threads
+#    - RPC calls use thread pools for handling
+#    - Process management unchanged
+#
+# 4. Performance characteristics:
+#    - Better performance for CPU-intensive operations
+#    - More predictable behavior under load
+#    - Enhanced debugging and profiling support
+#    - Standard Python threading tools work properly

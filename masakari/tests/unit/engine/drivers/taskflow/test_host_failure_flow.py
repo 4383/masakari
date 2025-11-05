@@ -16,6 +16,7 @@
 """
 Unit Tests for host failure TaskFlow
 """
+from concurrent import futures
 import copy
 from unittest import mock
 
@@ -56,7 +57,28 @@ class HostFailureTestCase(base.TestCase):
         self.notification_uuid = uuids.notification
         self.novaclient = nova.API()
         self.fake_client = fakes.FakeNovaClient()
+
+        # Patch utils.spawn_driver to use direct execution in tests
+        # This avoids issues with global thread pools in test environments
+        self.spawn_driver_patcher = mock.patch(
+            'masakari.engine.drivers.taskflow.host_failure.utils.spawn_driver',
+            side_effect=self._test_spawn_driver)
+        self.spawn_driver_patcher.start()
+        self.addCleanup(self.spawn_driver_patcher.stop)
+
         self.disabled_reason = CONF.host_failure.service_disable_reason
+
+    def _test_spawn_driver(self, func, *args, **kwargs):
+        """Test-friendly spawn_driver that executes directly."""
+
+        # Create a simple future that executes immediately
+        future = futures.Future()
+        try:
+            result = func(*args, **kwargs)
+            future.set_result(result)
+        except Exception as e:
+            future.set_exception(e)
+        return future
 
     def _verify_instance_evacuated(self):
 

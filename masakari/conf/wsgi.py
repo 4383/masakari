@@ -71,8 +71,8 @@ tcp_keepidle = cfg.IntOpt(
 
 default_pool_size = cfg.IntOpt(
     'default_pool_size',
-    default=1000,
-    help='Size of the pool of greenthreads used by wsgi',
+    default=300, min=4,
+    help='Size of the pool of threads used by wsgi',
     deprecated_group='DEFAULT',
     deprecated_name='wsgi_default_pool_size')
 
