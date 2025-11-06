@@ -178,7 +178,7 @@ class SpawnNTestCase(base.NoDBTestCase):
     def tearDown(self):
         super(SpawnNTestCase, self).tearDown()
         # Clean up global thread pools to prevent test hangs
-        utils._cleanup_global_executors()
+        cleanup_thread_pools()
 
     def test_spawn_n_no_context(self):
         self.assertIsNone(common_context.get_current())
@@ -265,3 +265,62 @@ class ValidateIntegerTestCase(base.NoDBTestCase):
                           utils.validate_integer,
                           chr(129), "UnicodeError",
                           max_value=1000)
+
+
+# Test utility functions for thread pool cleanup
+
+def cleanup_thread_pools():
+    """Cleanup global thread pool executors.
+
+    This function is intended for testing to ensure
+    proper cleanup between test runs.
+    """
+    # Import here to avoid circular dependencies
+    from masakari import utils
+
+    # Access the global variables directly from utils module
+    with utils._executor_lock:
+        # Shutdown executors if they exist
+        for executor_name, executor in [
+            ('_general_executor', utils._general_executor),
+            ('_notification_executor', utils._notification_executor),
+            ('_driver_executor', utils._driver_executor)
+        ]:
+            if executor is not None:
+                try:
+                    # Try graceful shutdown first
+                    executor.shutdown(wait=False)
+
+                    # Force terminate any remaining workers for
+                    # DynamicThreadPoolExecutor
+                    if hasattr(executor, '_workers'):
+                        for worker in list(getattr(executor, '_workers', [])):
+                            try:
+                                if hasattr(worker, '_stop'):
+                                    worker._stop()
+                                if hasattr(worker, 'stop'):
+                                    worker.stop()
+                            except Exception:
+                                pass
+
+                    # Force terminate threads for ThreadPoolExecutor
+                    if hasattr(executor, '_threads'):
+                        for thread in list(getattr(executor, '_threads', [])):
+                            try:
+                                if hasattr(thread, '_stop'):
+                                    thread._stop()
+                            except Exception:
+                                pass
+
+                except Exception:
+                    # Ignore shutdown errors
+                    pass
+
+        # Reset global variables
+        utils._general_executor = None
+        utils._notification_executor = None
+        utils._driver_executor = None
+
+        # Force garbage collection to clean up any remaining references
+        import gc
+        gc.collect()

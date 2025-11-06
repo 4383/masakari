@@ -85,59 +85,6 @@ def _get_driver_executor():
     return _driver_executor
 
 
-def _cleanup_global_executors():
-    """Cleanup global thread pool executors.
-
-    This function is primarily intended for testing to ensure
-    proper cleanup between test runs.
-    """
-    global _general_executor, _notification_executor, _driver_executor
-
-    with _executor_lock:
-        # Shutdown executors if they exist
-        for executor_name, executor in [
-            ('_general_executor', _general_executor),
-            ('_notification_executor', _notification_executor),
-            ('_driver_executor', _driver_executor)
-        ]:
-            if executor is not None:
-                try:
-                    # Try graceful shutdown first
-                    executor.shutdown(wait=False)
-
-                    # Force terminate any remaining workers for
-                    # DynamicThreadPoolExecutor
-                    if hasattr(executor, '_workers'):
-                        for worker in list(getattr(executor, '_workers', [])):
-                            try:
-                                if hasattr(worker, '_stop'):
-                                    worker._stop()
-                                if hasattr(worker, 'stop'):
-                                    worker.stop()
-                            except Exception:
-                                pass
-
-                    # Force terminate threads for ThreadPoolExecutor
-                    if hasattr(executor, '_threads'):
-                        for thread in list(getattr(executor, '_threads', [])):
-                            try:
-                                if hasattr(thread, '_stop'):
-                                    thread._stop()
-                            except Exception:
-                                pass
-
-                except Exception:
-                    # Ignore shutdown errors
-                    pass
-
-        # Reset global variables
-        _general_executor = None
-        _notification_executor = None
-        _driver_executor = None
-
-        # Force garbage collection to clean up any remaining references
-        import gc
-        gc.collect()
 
 
 def _context_wrapper(func):
