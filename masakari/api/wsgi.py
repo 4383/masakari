@@ -43,8 +43,8 @@ class Server(service.ServiceBase):
 
     default_pool_size = CONF.wsgi.default_pool_size
 
-    def __init__(self, name, app, host='0.0.0.0', port=0, pool_size=None,
-                 protocol=None, backlog=128,
+    def __init__(self, name, app, host='0.0.0.0', port=0,
+                 pool_size=None, backlog=128,
                  use_ssl=False, max_url_len=None):
         """Initialize, but do not start, a WSGI server.
 
@@ -62,7 +62,6 @@ class Server(service.ServiceBase):
         self.app = app
         self._server = None
         self._httpd = None
-        self._protocol = protocol
         self.pool_size = pool_size or self.default_pool_size
         self._pool = DynamicThreadPoolExecutor(max_workers=self.pool_size)
         self._pool_shutdown = False  # Track if pool has been shutdown
@@ -122,7 +121,8 @@ class Server(service.ServiceBase):
         :returns: None
         """
         # Recreate thread pool if it has been shutdown to allow restart
-        # ThreadPoolExecutor cannot be reused after shutdown() is called
+        # DynamicThreadPoolExecutor cannot be reused after shutdown()
+        # is called
         try:
             # Try to submit a dummy task to check if pool is still usable
             self._pool.submit(lambda: None)
