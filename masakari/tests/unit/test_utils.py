@@ -12,14 +12,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import importlib
 from unittest import mock
 
 from oslo_config import cfg
 from oslo_context import context as common_context
 from oslo_context import fixture as context_fixture
 
-import masakari
 from masakari import context
 from masakari import exception
 from masakari.tests.unit import base
@@ -49,72 +47,6 @@ class UTF8TestCase(base.NoDBTestCase):
         self.assertEqual(some_value, utils.utf8(some_value).decode("utf-8"))
 
 
-class MonkeyPatchTestCase(base.NoDBTestCase):
-    """Unit test for utils.monkey_patch()."""
-    def setUp(self):
-        super(MonkeyPatchTestCase, self).setUp()
-        self.example_package = 'masakari.tests.unit.monkey_patch_example.'
-        self.flags(
-            monkey_patch=True,
-            monkey_patch_modules=[self.example_package + 'example_a' + ':' +
-            self.example_package + 'example_decorator'])
-
-    def test_monkey_patch(self):
-        utils.monkey_patch()
-        masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION = []
-        from masakari.tests.unit.monkey_patch_example import example_a
-        from masakari.tests.unit.monkey_patch_example import example_b
-
-        self.assertEqual('Example function', example_a.example_function_a())
-        exampleA = example_a.ExampleClassA()
-        exampleA.example_method()
-        ret_a = exampleA.example_method_add(3, 5)
-        self.assertEqual(ret_a, 8)
-
-        self.assertEqual('Example function', example_b.example_function_b())
-        exampleB = example_b.ExampleClassB()
-        exampleB.example_method()
-        ret_b = exampleB.example_method_add(3, 5)
-
-        self.assertEqual(ret_b, 8)
-        package_a = self.example_package + 'example_a.'
-        self.assertIn(package_a + 'example_function_a',
-                      masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-
-        self.assertIn(package_a + 'ExampleClassA.example_method',
-                      masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-        self.assertIn(package_a + 'ExampleClassA.example_method_add',
-                      masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-        package_b = self.example_package + 'example_b.'
-        self.assertNotIn(package_b + 'example_function_b', (
-            masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION))
-        self.assertNotIn(package_b + 'ExampleClassB.example_method', (
-            masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION))
-        self.assertNotIn(package_b + 'ExampleClassB.example_method_add', (
-            masakari.tests.unit.monkey_patch_example.CALLED_FUNCTION))
-
-
-class MonkeyPatchDefaultTestCase(base.NoDBTestCase):
-    """Unit test for default monkey_patch_modules value."""
-
-    def setUp(self):
-        super(MonkeyPatchDefaultTestCase, self).setUp()
-        self.flags(
-            monkey_patch=True)
-
-    def test_monkey_patch_default_mod(self):
-        # monkey_patch_modules is defined to be
-        #    <module_to_patch>:<decorator_to_patch_with>
-        #  Here we check that both parts of the default values are
-        # valid
-        for module in CONF.monkey_patch_modules:
-            m = module.split(':', 1)
-            # Check we can import the module to be patched
-            importlib.import_module(m[0])
-            # check the decorator is valid
-            decorator_name = m[1].rsplit('.', 1)
-            decorator_module = importlib.import_module(decorator_name[0])
-            getattr(decorator_module, decorator_name[1])
 
 
 class ExpectedArgsTestCase(base.NoDBTestCase):

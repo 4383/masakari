@@ -19,7 +19,6 @@ from concurrent import futures
 import contextlib
 import functools
 import inspect
-import pyclbr
 import shutil
 import sys
 import tempfile
@@ -138,47 +137,6 @@ def check_isinstance(obj, cls):
         return obj
     raise Exception(_('Expected object of type: %s') % (str(cls)))
 
-
-def monkey_patch():
-    """If the CONF.monkey_patch set as True,
-    this function patches a decorator
-    for all functions in specified modules.
-    You can set decorators for each modules
-    using CONF.monkey_patch_modules.
-    The format is "Module path:Decorator function".
-
-    name - name of the function
-    function - object of the function
-    """
-    # If CONF.monkey_patch is not True, this function do nothing.
-    if not CONF.monkey_patch:
-        return
-
-    def is_method(obj):
-        # Unbound methods became regular functions on Python 3
-        return inspect.ismethod(obj) or inspect.isfunction(obj)
-
-    # Get list of modules and decorators
-    for module_and_decorator in CONF.monkey_patch_modules:
-        module, decorator_name = module_and_decorator.split(':')
-        # import decorator function
-        decorator = importutils.import_class(decorator_name)
-        __import__(module)
-        # Retrieve module information using pyclbr
-        module_data = pyclbr.readmodule_ex(module)
-        for key, value in module_data.items():
-            # set the decorator for the class methods
-            if isinstance(value, pyclbr.Class):
-                clz = importutils.import_class("%s.%s" % (module, key))
-                for method, func in inspect.getmembers(clz, is_method):
-                    setattr(clz, method,
-                            decorator("%s.%s.%s" % (module, key,
-                                                    method), func))
-            # set the decorator for the function
-            if isinstance(value, pyclbr.Function):
-                func = importutils.import_class("%s.%s" % (module, key))
-                setattr(sys.modules[module], key,
-                        decorator("%s.%s" % (module, key), func))
 
 
 def walk_class_hierarchy(clazz, encountered=None):
