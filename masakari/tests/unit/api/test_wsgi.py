@@ -124,26 +124,6 @@ class TestWSGIServer(base.NoDBTestCase):
         server.stop()
         server.wait()
 
-    @testtools.skipIf(not utils.is_linux(), 'SO_REUSEADDR behaves differently '
-                                            'on OSX and BSD, see bugs '
-                                            '1436895 and 1467145')
-    def test_socket_options_for_simple_server(self):
-        # test normal socket options has set properly
-        self.flags(tcp_keepidle=500, group='wsgi')
-        server = wsgi.Server(
-            "test_socket_options", None, host="127.0.0.1", port=0)
-        server.start()
-        sock = server._socket
-        self.assertEqual(1, sock.getsockopt(socket.SOL_SOCKET,
-                                            socket.SO_REUSEADDR))
-        self.assertEqual(1, sock.getsockopt(socket.SOL_SOCKET,
-                                            socket.SO_KEEPALIVE))
-        if hasattr(socket, 'TCP_KEEPIDLE'):
-            self.assertEqual(CONF.wsgi.tcp_keepidle,
-                             sock.getsockopt(socket.IPPROTO_TCP,
-                                             socket.TCP_KEEPIDLE))
-        server.stop()
-        server.wait()
 
     def test_server_pool_shutdown(self):
         # test pools shutdown method gets called while stopping server

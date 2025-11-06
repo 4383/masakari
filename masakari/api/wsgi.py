@@ -83,37 +83,6 @@ class Server(service.ServiceBase):
         LOG.info("%(name)s configured for %(host)s:%(port)d",
                  {'name': self.name, 'host': self.host, 'port': self.port})
 
-    @property
-    def _socket(self):
-        """Compatibility property to access cheroot's socket."""
-        if not self._httpd:
-            return None
-
-        # Try various ways to access cheroot's socket
-        socket_attrs = [
-            'socket',           # Direct socket attribute
-            'sock',            # Alternative socket name
-            '_sock',           # Private socket
-            'listener',        # Listener socket
-            'listeners'        # Multiple listeners
-        ]
-
-        for attr in socket_attrs:
-            if hasattr(self._httpd, attr):
-                sock = getattr(self._httpd, attr)
-                if sock:
-                    # For listeners (list), get the first one
-                    if isinstance(sock, list) and sock:
-                        return sock[0]
-                    return sock
-
-        # If no direct socket found, try to get it from the gateway
-        if hasattr(self._httpd, 'gateway') and self._httpd.gateway:
-            gateway = self._httpd.gateway
-            if hasattr(gateway, 'socket'):
-                return gateway.socket
-
-        return None
 
     def start(self):
         """Start serving a WSGI application.
