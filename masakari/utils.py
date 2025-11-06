@@ -58,7 +58,8 @@ def _get_general_executor():
             if _general_executor is None:
                 # Try with thread_name_prefix (Python 3.6+)
                 _general_executor = futures.ThreadPoolExecutor(
-                    max_workers=64, thread_name_prefix='masakari-general-')
+                    max_workers=CONF.executor_thread_pool_size,
+                    thread_name_prefix='masakari-general-')
     return _general_executor
 
 
@@ -69,7 +70,7 @@ def _get_notification_executor():
         with _executor_lock:
             if _notification_executor is None:
                 _notification_executor = DynamicThreadPoolExecutor(
-                    max_workers=32)
+                    max_workers=CONF.notification_thread_pool_size)
     return _notification_executor
 
 
@@ -80,7 +81,7 @@ def _get_driver_executor():
         with _executor_lock:
             if _driver_executor is None:
                 _driver_executor = DynamicThreadPoolExecutor(
-                    max_workers=16)
+                    max_workers=CONF.driver_thread_pool_size)
     return _driver_executor
 
 
