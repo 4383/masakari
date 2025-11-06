@@ -28,7 +28,7 @@ driver_thread_pool_size = 16
 # Maximum number of threads to spawn concurrently for HTTP requests
 # This replaces the eventlet pool size and controls how many
 # concurrent HTTP requests can be handled
-default_pool_size = 1000
+default_pool_size = 300
 
 # Client socket timeout in seconds
 # How long to wait for client connections before timing out
