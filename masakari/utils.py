@@ -20,7 +20,6 @@ import contextlib
 import functools
 import inspect
 import shutil
-import sys
 import tempfile
 import threading
 
@@ -28,7 +27,6 @@ from futurist import DynamicThreadPoolExecutor
 from oslo_concurrency import lockutils
 from oslo_context import context as common_context
 from oslo_log import log as logging
-from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 
@@ -84,8 +82,6 @@ def _get_driver_executor():
     return _driver_executor
 
 
-
-
 def _context_wrapper(func):
     """Wrapper to preserve OpenStack context across threads."""
     current_context = common_context.get_current()
@@ -136,7 +132,6 @@ def check_isinstance(obj, cls):
     if isinstance(obj, cls):
         return obj
     raise Exception(_('Expected object of type: %s') % (str(cls)))
-
 
 
 def walk_class_hierarchy(clazz, encountered=None):

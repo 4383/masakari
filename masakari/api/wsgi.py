@@ -83,7 +83,6 @@ class Server(service.ServiceBase):
         LOG.info("%(name)s configured for %(host)s:%(port)d",
                  {'name': self.name, 'host': self.host, 'port': self.port})
 
-
     def start(self):
         """Start serving a WSGI application.
 
@@ -368,8 +367,9 @@ class Server(service.ServiceBase):
                     # Final cleanup attempt
                     if hasattr(self._httpd, 'bus') and self._httpd.bus:
                         self._httpd.bus.exit()
-                except Exception:
-                    pass
+                except Exception as e:
+                    LOG.debug(
+                        f"Error during final cleanup of HTTP server bus: {e}")
 
             self._httpd = None
             self._server = None

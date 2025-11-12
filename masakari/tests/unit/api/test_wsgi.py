@@ -17,7 +17,6 @@
 """Unit tests for `masakari.api.wsgi`."""
 
 import os.path
-import socket
 import tempfile
 from unittest import mock
 
@@ -123,7 +122,6 @@ class TestWSGIServer(base.NoDBTestCase):
         self.assertNotEqual(0, server.port)
         server.stop()
         server.wait()
-
 
     def test_server_pool_shutdown(self):
         # test pools shutdown method gets called while stopping server

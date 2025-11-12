@@ -47,8 +47,6 @@ class UTF8TestCase(base.NoDBTestCase):
         self.assertEqual(some_value, utils.utf8(some_value).decode("utf-8"))
 
 
-
-
 class ExpectedArgsTestCase(base.NoDBTestCase):
     def test_passes(self):
         @utils.expects_func_args('foo', 'baz')
