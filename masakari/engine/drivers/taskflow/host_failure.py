@@ -13,8 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import eventlet
-from eventlet import greenpool
+from concurrent import futures
+import time
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -56,7 +56,7 @@ class DisableComputeServiceTask(base.MasakariTask):
         log_msg = ("Sleeping %(wait)s sec before starting recovery "
                "thread until nova recognizes the node down.")
         LOG.info(log_msg, {'wait': CONF.wait_period_after_service_update})
-        eventlet.sleep(CONF.wait_period_after_service_update)
+        time.sleep(CONF.wait_period_after_service_update)
         msg = "Disabled compute service on host: '%s'" % host_name
         self.update_details(msg, 1.0)
 
@@ -381,23 +381,30 @@ class EvacuateInstancesTask(base.MasakariTask):
                 # Set reserved property of reserved_host to False
                 self.update_host_method(context, reserved_host)
 
-            thread_pool = greenpool.GreenPool(
-                CONF.host_failure_recovery_threads)
-
-            nonlocal all_vmoves
-
+            # Submit all evacuation tasks using centralized driver thread pool
+            evacuation_futures = []
             for vmove in all_vmoves:
                 msg = ("Evacuation of instance started: '%s'"
                        % vmove.instance_uuid)
                 self.update_details(msg, 0.5)
-                thread_pool.spawn_n(self._evacuate_and_confirm, self.context,
-                                    vmove, reserved_host)
-            thread_pool.waitall()
+                # Use centralized spawn_driver for consistency and
+                # thread pool management
+                future = utils.spawn_driver(
+                    self._evacuate_and_confirm, self.context,
+                    vmove, reserved_host)
+                evacuation_futures.append(future)
 
-            all_vmoves = objects.VMoveList.get_all_vmoves(
+            # Wait for all evacuations to complete
+            for future in futures.as_completed(evacuation_futures):
+                try:
+                    future.result()  # This will raise any exceptions
+                except Exception as e:
+                    LOG.exception("Exception in evacuation thread: %s", e)
+
+            updated_vmoves = objects.VMoveList.get_all_vmoves(
                 self.context, notification_uuid)
 
-            succeeded_vmoves = [i.instance_uuid for i in all_vmoves
+            succeeded_vmoves = [i.instance_uuid for i in updated_vmoves
                     if i.status == fields.VMoveStatus.SUCCEEDED]
             if succeeded_vmoves:
                 succeeded_vmoves.sort()
@@ -408,7 +415,7 @@ class EvacuateInstancesTask(base.MasakariTask):
                 self.update_details(msg, 0.7)
 
             failed_vmoves = [i.instance_uuid for i in
-                    all_vmoves if i.status == fields.VMoveStatus.FAILED]
+                    updated_vmoves if i.status == fields.VMoveStatus.FAILED]
             if failed_vmoves:
                 msg = ("Failed to evacuate instances "
                        "'%(instance_list)s' from host "

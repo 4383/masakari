@@ -15,19 +15,18 @@
 
 """Utilities and helper functions."""
 
+from concurrent import futures
 import contextlib
 import functools
 import inspect
-import pyclbr
 import shutil
-import sys
 import tempfile
+import threading
 
-import eventlet
+from futurist import DynamicThreadPoolExecutor
 from oslo_concurrency import lockutils
 from oslo_context import context as common_context
 from oslo_log import log as logging
-from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 
@@ -40,6 +39,64 @@ from masakari import safe_utils
 CONF = masakari.conf.CONF
 
 LOG = logging.getLogger(__name__)
+
+# Global thread pool executors for different types of operations
+_general_executor = None
+_notification_executor = None
+_driver_executor = None
+_executor_lock = threading.Lock()
+
+
+def _get_general_executor():
+    """Get or create the general-purpose thread pool executor."""
+    global _general_executor
+    if _general_executor is None:
+        with _executor_lock:
+            if _general_executor is None:
+                # Try with thread_name_prefix (Python 3.6+)
+                _general_executor = futures.ThreadPoolExecutor(
+                    max_workers=CONF.executor_thread_pool_size,
+                    thread_name_prefix='masakari-general-')
+    return _general_executor
+
+
+def _get_notification_executor():
+    """Get or create the notification thread pool executor."""
+    global _notification_executor
+    if _notification_executor is None:
+        with _executor_lock:
+            if _notification_executor is None:
+                _notification_executor = DynamicThreadPoolExecutor(
+                    max_workers=CONF.notification_thread_pool_size)
+    return _notification_executor
+
+
+def _get_driver_executor():
+    """Get or create the driver thread pool executor."""
+    global _driver_executor
+    if _driver_executor is None:
+        with _executor_lock:
+            if _driver_executor is None:
+                _driver_executor = DynamicThreadPoolExecutor(
+                    max_workers=CONF.driver_thread_pool_size)
+    return _driver_executor
+
+
+def _context_wrapper(func):
+    """Wrapper to preserve OpenStack context across threads."""
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        current_context = common_context.get_current()
+        if current_context is not None:
+            current_context.update_store()
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            LOG.exception("Exception in spawned thread: %s", e)
+            raise
+
+    return wrapped
 
 
 def reraise(tp, value, tb=None):
@@ -75,48 +132,6 @@ def check_isinstance(obj, cls):
     if isinstance(obj, cls):
         return obj
     raise Exception(_('Expected object of type: %s') % (str(cls)))
-
-
-def monkey_patch():
-    """If the CONF.monkey_patch set as True,
-    this function patches a decorator
-    for all functions in specified modules.
-    You can set decorators for each modules
-    using CONF.monkey_patch_modules.
-    The format is "Module path:Decorator function".
-
-    name - name of the function
-    function - object of the function
-    """
-    # If CONF.monkey_patch is not True, this function do nothing.
-    if not CONF.monkey_patch:
-        return
-
-    def is_method(obj):
-        # Unbound methods became regular functions on Python 3
-        return inspect.ismethod(obj) or inspect.isfunction(obj)
-
-    # Get list of modules and decorators
-    for module_and_decorator in CONF.monkey_patch_modules:
-        module, decorator_name = module_and_decorator.split(':')
-        # import decorator function
-        decorator = importutils.import_class(decorator_name)
-        __import__(module)
-        # Retrieve module information using pyclbr
-        module_data = pyclbr.readmodule_ex(module)
-        for key, value in module_data.items():
-            # set the decorator for the class methods
-            if isinstance(value, pyclbr.Class):
-                clz = importutils.import_class("%s.%s" % (module, key))
-                for method, func in inspect.getmembers(clz, is_method):
-                    setattr(clz, method,
-                            decorator("%s.%s.%s" % (module, key,
-                                                    method), func))
-            # set the decorator for the function
-            if isinstance(value, pyclbr.Function):
-                func = importutils.import_class("%s.%s" % (module, key))
-                setattr(sys.modules[module], key,
-                        decorator("%s.%s" % (module, key), func))
 
 
 def walk_class_hierarchy(clazz, encountered=None):
@@ -192,7 +207,7 @@ class ExceptionHelper(object):
 
 
 def spawn(func, *args, **kwargs):
-    """Passthrough method for eventlet.spawn.
+    """Spawn a function in a thread with context preservation.
 
     This utility exists so that it can be stubbed for testing without
     interfering with the service spawns.
@@ -200,22 +215,16 @@ def spawn(func, *args, **kwargs):
     It will also grab the context from the threadlocal store and add it to
     the store on the new thread.  This allows for continuity in logging the
     context when using this method to spawn a new thread.
+
+    Note: Now using standard ThreadPoolExecutor for threading.
     """
-    _context = common_context.get_current()
-
-    @functools.wraps(func)
-    def context_wrapper(*args, **kwargs):
-        # NOTE: If update_store is not called after spawn it won't be
-        # available for the logger to pull from threadlocal storage.
-        if _context is not None:
-            _context.update_store()
-        return func(*args, **kwargs)
-
-    return eventlet.spawn(context_wrapper, *args, **kwargs)
+    executor = _get_general_executor()
+    wrapped_func = _context_wrapper(func)
+    return executor.submit(wrapped_func, *args, **kwargs)
 
 
 def spawn_n(func, *args, **kwargs):
-    """Passthrough method for eventlet.spawn_n.
+    """Spawn a function in a thread without waiting for result.
 
     This utility exists so that it can be stubbed for testing without
     interfering with the service spawns.
@@ -223,18 +232,50 @@ def spawn_n(func, *args, **kwargs):
     It will also grab the context from the threadlocal store and add it to
     the store on the new thread.  This allows for continuity in logging the
     context when using this method to spawn a new thread.
+
+    Note: Now using standard ThreadPoolExecutor for threading.
     """
-    _context = common_context.get_current()
+    executor = _get_general_executor()
+    wrapped_func = _context_wrapper(func)
+    executor.submit(wrapped_func, *args, **kwargs)  # Fire and forget
 
-    @functools.wraps(func)
-    def context_wrapper(*args, **kwargs):
-        # NOTE: If update_store is not called after spawn_n it won't be
-        # available for the logger to pull from threadlocal storage.
-        if _context is not None:
-            _context.update_store()
-        func(*args, **kwargs)
 
-    eventlet.spawn_n(context_wrapper, *args, **kwargs)
+def spawn_notification(func, *args, **kwargs):
+    """Spawn a notification processing function with dedicated thread pool.
+
+    This utility provides optimized execution for notification processing
+    using futurist's DynamicThreadPoolExecutor with dedicated resources.
+
+    Args:
+        func: The notification processing function to execute
+        *args: Positional arguments for the function
+        **kwargs: Keyword arguments for the function
+
+    Returns:
+        Future: A Future object representing the execution
+    """
+    executor = _get_notification_executor()
+    wrapped_func = _context_wrapper(func)
+    return executor.submit(wrapped_func, *args, **kwargs)
+
+
+def spawn_driver(func, *args, **kwargs):
+    """Spawn a driver execution function with dedicated thread pool.
+
+    This utility provides optimized execution for driver operations
+    using futurist's DynamicThreadPoolExecutor with dedicated resources.
+
+    Args:
+        func: The driver function to execute
+        *args: Positional arguments for the function
+        **kwargs: Keyword arguments for the function
+
+    Returns:
+        Future: A Future object representing the execution
+    """
+    executor = _get_driver_executor()
+    wrapped_func = _context_wrapper(func)
+    return executor.submit(wrapped_func, *args, **kwargs)
 
 
 @contextlib.contextmanager
