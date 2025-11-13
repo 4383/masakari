@@ -202,8 +202,14 @@ class ValidateIntegerTestCase(base.NoDBTestCase):
 def cleanup_thread_pools():
     """Cleanup global thread pool executors.
 
-    This function is intended for testing to ensure
-    proper cleanup between test runs.
+    This function is intended for testing to ensure proper cleanup between
+    test runs. It performs aggressive cleanup to prevent test interference.
+
+    Note: This aggressive cleanup is necessary for tests because:
+    - Thread pools may have long-running tasks that don't finish cleanly
+    - Residual threads from previous tests can interfere with new tests
+    - Some tests may not properly wait for async operations to complete
+    - Global executors are shared across test cases and need forced reset
     """
     # Import here to avoid circular dependencies
     from masakari import utils
@@ -218,32 +224,11 @@ def cleanup_thread_pools():
         ]:
             if executor is not None:
                 try:
-                    # Try graceful shutdown first
-                    executor.shutdown(wait=False)
-
-                    # Force terminate any remaining workers for
-                    # DynamicThreadPoolExecutor
-                    if hasattr(executor, '_workers'):
-                        for worker in list(getattr(executor, '_workers', [])):
-                            try:
-                                if hasattr(worker, '_stop'):
-                                    worker._stop()
-                                if hasattr(worker, 'stop'):
-                                    worker.stop()
-                            except Exception:
-                                pass
-
-                    # Force terminate threads for ThreadPoolExecutor
-                    if hasattr(executor, '_threads'):
-                        for thread in list(getattr(executor, '_threads', [])):
-                            try:
-                                if hasattr(thread, '_stop'):
-                                    thread._stop()
-                            except Exception:
-                                pass
-
+                    # Use proper shutdown method with wait=True for graceful cleanup
+                    # This ensures all pending tasks complete before proceeding
+                    executor.shutdown(wait=True)
                 except Exception:
-                    # Ignore shutdown errors
+                    # Ignore shutdown errors - executor may already be shutdown
                     pass
 
         # Reset global variables
