@@ -84,10 +84,10 @@ def _get_driver_executor():
 
 def _context_wrapper(func):
     """Wrapper to preserve OpenStack context across threads."""
-    current_context = common_context.get_current()
 
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
+        current_context = common_context.get_current()
         if current_context is not None:
             current_context.update_store()
         try:
