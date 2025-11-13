@@ -53,7 +53,6 @@ def _get_general_executor():
     if _general_executor is None:
         with _executor_lock:
             if _general_executor is None:
-                # Try with thread_name_prefix (Python 3.6+)
                 _general_executor = futures.ThreadPoolExecutor(
                     max_workers=CONF.executor_thread_pool_size,
                     thread_name_prefix='masakari-general-')
