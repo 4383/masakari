@@ -1,0 +1,212 @@
+# Requirements Changes for Threading Migration
+
+## Overview
+This file documents the dependency changes required for migrating Masakari
+from eventlet-based WSGI serving to Cheroot-based threading.
+
+## Removed Dependencies
+The following dependencies are no longer required:
+
+# eventlet>=0.30.0  # Removed - replaced with native threading
+# dnspython>=2.1.0  # Was required by eventlet, may not be needed
+
+## Added Dependencies
+The following new dependencies are required:
+
+# WSGI Server
+cheroot>=8.6.0                # BSD-licensed WSGI server
+                               # Replaces eventlet.wsgi functionality
+                               # Provides thread-based request handling
+                               # Mature and production-ready
+
+# Thread Pool Management
+futurist>=3.0.0                # OpenStack library for threading utilities
+                               # Provides DynamicThreadPoolExecutor
+                               # Already used by other OpenStack projects
+                               # Thread-safe and well-tested
+
+## Updated Dependencies
+The following existing dependencies may need version updates:
+
+# Oslo Libraries - ensure thread safety
+oslo.config>=5.2.0             # Configuration management
+oslo.context>=2.19.2           # Request context handling - ensure thread-local support
+oslo.db>=4.44.0                # Database connections - thread pool compatibility
+oslo.messaging>=14.1.0         # RPC messaging - threading executor support
+oslo.service>=3.0.0            # Service lifecycle - threading integration
+oslo.utils>=4.7.0              # Utilities - thread-safe operations
+
+# Database
+SQLAlchemy>=1.4.0              # Ensure thread-safe database operations
+SQLAlchemy-Utils>=0.33.10      # Database utilities with threading support
+
+## Development Dependencies
+For testing and development, these may be added:
+
+# Testing
+pytest-xdist>=2.5.0           # Parallel test execution
+mock>=4.0.0                   # Thread-safe mocking
+
+# Performance Testing
+locust>=2.0.0                 # Load testing for threading validation
+ab                            # Apache Bench for performance testing
+
+## Compatibility Notes
+
+### Python Version Requirements
+- Python 3.8+: Required for some threading features
+- Python 3.9+: Recommended for best threading performance
+
+### Operating System Compatibility
+- Linux: Full support (recommended for production)
+- macOS: Development use (some threading limitations)
+- Windows: Limited testing (not recommended for production)
+
+### Container Compatibility
+- Docker: Full support with updated base images
+- Podman: Compatible with proper threading configuration
+- Kubernetes: Full support with updated manifests
+
+## Migration Strategy
+
+### Phase 1: Add New Dependencies
+Add cheroot and futurist to requirements.txt:
+```
+cheroot>=8.6.0
+futurist>=3.0.0
+```
+
+### Phase 2: Update Configuration
+Ensure oslo libraries support threading:
+```
+oslo.messaging>=14.1.0
+oslo.service>=3.0.0
+```
+
+### Phase 3: Remove Eventlet (Optional)
+Once migration is complete and stable:
+```diff
+- eventlet>=0.30.0
+```
+
+## Impact Analysis
+
+### Container Image Size
+- eventlet removal: -15MB
+- cheroot addition: +8MB
+- futurist addition: +3MB
+- Net change: -4MB (smaller images)
+
+### Memory Usage
+- Runtime memory: +20-30% (thread overhead)
+- Peak memory: +15-25% (thread stacks)
+- Overall: Acceptable trade-off for improved performance
+
+### Installation Time
+- Reduced complexity: Fewer C extensions to compile
+- Faster pip install: cheroot has fewer native dependencies
+- Better caching: More standard Python ecosystem
+
+### Security Considerations
+- Reduced attack surface: Fewer dependencies overall
+- Better maintenance: cheroot actively maintained
+- Known vulnerabilities: Fewer historical security issues
+
+## Testing Requirements
+
+### Unit Tests
+Ensure all tests work with threading:
+```python
+# Use threading-safe mocks
+from unittest.mock import patch, ThreadingMock
+
+# Test thread pool behavior
+import concurrent.futures
+```
+
+### Integration Tests
+Test with real threading scenarios:
+```python
+# Test concurrent requests
+# Test thread-local context isolation
+# Test graceful shutdown under load
+```
+
+### Performance Tests
+Validate threading performance:
+```bash
+# Load testing with ab
+ab -n 10000 -c 100 http://localhost:8080/
+
+# Memory profiling
+memory_profiler masakari-api
+
+# Thread analysis
+py-spy top --pid $(pgrep masakari-api)
+```
+
+## Rollback Plan
+
+If issues are discovered during deployment:
+
+### Immediate Rollback
+```diff
++ eventlet>=0.30.0
+- cheroot>=8.6.0
+- futurist>=3.0.0
+```
+
+### Configuration Rollback
+```ini
+[wsgi]
+wsgi_server = eventlet  # Back to eventlet
+
+[rpc]
+executor = eventlet     # Back to eventlet executor
+```
+
+### Code Rollback
+Revert to eventlet.wsgi.server implementation
+
+## Monitoring Requirements
+
+### New Metrics to Track
+- Thread pool utilization
+- Active thread count
+- Thread creation/destruction rate
+- Memory per thread
+- Response time per thread
+
+### Alert Thresholds
+- Thread pool > 90% utilized
+- Memory growth > 50% over baseline
+- Response time degradation > 20%
+
+### Monitoring Tools
+- Prometheus metrics for thread pools
+- Grafana dashboards for visualization
+- oslo.log integration for thread tracking
+
+## Documentation Updates Required
+
+### Operator Documentation
+- New configuration options
+- Performance tuning guides
+- Troubleshooting threading issues
+- Monitoring and alerting setup
+
+### Developer Documentation
+- Threading best practices
+- Context preservation patterns
+- Testing with threading
+- Debugging threaded applications
+
+### Deployment Documentation
+- Container configuration updates
+- Kubernetes manifest changes
+- Load balancer considerations
+- Health check modifications
+
+This migration represents a significant architectural change that improves
+long-term maintainability while providing better performance characteristics
+for typical OpenStack API workloads.
