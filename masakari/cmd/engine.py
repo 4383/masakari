@@ -23,7 +23,7 @@ import masakari.conf
 from masakari import config
 from masakari import objects
 from masakari import service
-from masakari import utils
+from masakari import service_backend
 
 
 CONF = masakari.conf.CONF
@@ -32,7 +32,10 @@ CONF = masakari.conf.CONF
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "masakari")
-    utils.monkey_patch()
+
+    # Initialize oslo.service threading backend
+    service_backend.initialize_service_backend()
+
     objects.register_all()
 
     server = service.Service.create(binary='masakari-engine',
