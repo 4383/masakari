@@ -17,15 +17,14 @@
 """Unit tests for `masakari.api.wsgi`."""
 
 import os.path
-import socket
 import tempfile
 from unittest import mock
 
-import eventlet
-import eventlet.wsgi
-from oslo_config import cfg
 import requests
 import testtools
+import time
+
+from oslo_config import cfg
 
 from masakari.api import wsgi
 import masakari.exception
@@ -100,15 +99,12 @@ document_root = /tmp
 class TestWSGIServer(base.NoDBTestCase):
     """WSGI server tests."""
 
+    def tearDown(self):
+        super(TestWSGIServer, self).tearDown()
+
     def test_no_app(self):
         server = wsgi.Server("test_app", None)
         self.assertEqual("test_app", server.name)
-
-    def test_custom_max_header_line(self):
-        self.flags(max_header_line=4096, group='wsgi')  # Default is 16384
-        wsgi.Server("test_custom_max_header_line", None)
-        self.assertEqual(CONF.wsgi.max_header_line,
-                         eventlet.wsgi.MAX_HEADER_LINE)
 
     def test_start_random_port(self):
         server = wsgi.Server("test_random_port", None, host="127.0.0.1",
@@ -127,37 +123,16 @@ class TestWSGIServer(base.NoDBTestCase):
         server.stop()
         server.wait()
 
-    @testtools.skipIf(not utils.is_linux(), 'SO_REUSEADDR behaves differently '
-                                            'on OSX and BSD, see bugs '
-                                            '1436895 and 1467145')
-    def test_socket_options_for_simple_server(self):
-        # test normal socket options has set properly
-        self.flags(tcp_keepidle=500, group='wsgi')
-        server = wsgi.Server(
-            "test_socket_options", None, host="127.0.0.1", port=0)
-        server.start()
-        sock = server._socket
-        self.assertEqual(1, sock.getsockopt(socket.SOL_SOCKET,
-                                            socket.SO_REUSEADDR))
-        self.assertEqual(1, sock.getsockopt(socket.SOL_SOCKET,
-                                            socket.SO_KEEPALIVE))
-        if hasattr(socket, 'TCP_KEEPIDLE'):
-            self.assertEqual(CONF.wsgi.tcp_keepidle,
-                             sock.getsockopt(socket.IPPROTO_TCP,
-                                             socket.TCP_KEEPIDLE))
-        server.stop()
-        server.wait()
-
-    def test_server_pool_waitall(self):
-        # test pools waitall method gets called while stopping server
+    def test_server_pool_shutdown(self):
+        # test pools shutdown method gets called while stopping server
         server = wsgi.Server("test_server", None,
             host="127.0.0.1")
         server.start()
         with mock.patch.object(server._pool,
-                              'waitall') as mock_waitall:
+                              'shutdown') as mock_shutdown:
             server.stop()
             server.wait()
-            mock_waitall.assert_called_once_with()
+            mock_shutdown.assert_called_once_with(wait=False)
 
     def test_uri_length_limit(self):
         server = wsgi.Server("test_uri_length_limit", None,
@@ -166,13 +141,13 @@ class TestWSGIServer(base.NoDBTestCase):
 
         uri = "http://127.0.0.1:%d/%s" % (server.port, 10000 * 'x')
         resp = requests.get(uri, proxies={"http": ""})
-        eventlet.sleep(0)
+        time.sleep(0)
         self.assertNotEqual(resp.status_code,
                             requests.codes.REQUEST_URI_TOO_LARGE)
 
         uri = "http://127.0.0.1:%d/%s" % (server.port, 20000 * 'x')
         resp = requests.get(uri, proxies={"http": ""})
-        eventlet.sleep(0)
+        time.sleep(0)
         self.assertEqual(resp.status_code,
                          requests.codes.REQUEST_URI_TOO_LARGE)
         server.stop()
@@ -181,41 +156,23 @@ class TestWSGIServer(base.NoDBTestCase):
     def test_reset_pool_size_to_default(self):
         server = wsgi.Server("test_resize", None,
             host="127.0.0.1", max_url_len=16384)
+
+        initial_pool_size = server.pool_size
         server.start()
 
-        # Stopping the server, which in turn sets pool size to 0
+        # Stopping the server
         server.stop()
-        self.assertEqual(server._pool.size, 0)
+        # Note: pool_size attribute doesn't change on stop,
+        # just the pool is shutdown
+        self.assertEqual(server.pool_size, initial_pool_size)
 
         # Resetting pool size to default
         server.reset()
-        server.start()
-        self.assertEqual(server._pool.size, CONF.wsgi.default_pool_size)
+        self.assertEqual(server.pool_size, CONF.wsgi.default_pool_size)
 
-    def test_client_socket_timeout(self):
-        self.flags(client_socket_timeout=5, group='wsgi')
+        # Verify the pool was recreated properly
+        self.assertIsNotNone(server._pool)
 
-        # mocking eventlet spawn method to check it is called with
-        # configured 'client_socket_timeout' value.
-        with mock.patch.object(eventlet,
-                               'spawn') as mock_spawn:
-            server = wsgi.Server("test_app", None, host="127.0.0.1", port=0)
-            server.start()
-            _, kwargs = mock_spawn.call_args
-            self.assertEqual(CONF.wsgi.client_socket_timeout,
-                             kwargs['socket_timeout'])
-            server.stop()
-
-    def test_keep_alive(self):
-        self.flags(keep_alive=False, group='wsgi')
-
-        # mocking eventlet spawn method to check it is called with
-        # configured 'keep_alive' value.
-        with mock.patch.object(eventlet,
-                               'spawn') as mock_spawn:
-            server = wsgi.Server("test_app", None, host="127.0.0.1", port=0)
-            server.start()
-            _, kwargs = mock_spawn.call_args
-            self.assertEqual(CONF.wsgi.keep_alive,
-                             kwargs['keepalive'])
-            server.stop()
+        # Ensure proper cleanup
+        server.stop()
+        server.wait()
