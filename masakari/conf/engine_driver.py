@@ -89,6 +89,27 @@ will not be added to the aggregate group of failed compute host."""),
                default="Masakari detected host failed.",
                help="Compute disable reason in case Masakari detects host "
                     "failure."),
+    cfg.FloatOpt('max_evacuation_failure_rate',
+                 default=0.2,
+                 min=0.0,
+                 max=1.0,
+                 help="""
+Maximum failure rate threshold for evacuation operations.
+If the percentage of failed evacuations exceeds this threshold,
+the behavior is determined by the 'fail_fast_on_evacuation_errors' setting.
+Value should be between 0.0 (0%) and 1.0 (100%).
+Default is 0.2 (20% failure threshold).
+"""),
+    cfg.BoolOpt('fail_fast_on_evacuation_errors',
+                default=False,
+                help="""
+Determines behavior when evacuation failure rate exceeds the threshold.
+When set to True, the entire host recovery operation will fail if the
+failure rate exceeds 'max_evacuation_failure_rate'.
+When set to False, a warning will be logged but the operation will continue
+in "best effort" mode, allowing partial recovery.
+Default is False (best effort mode).
+"""),
 ]
 
 instance_failure_options = [
