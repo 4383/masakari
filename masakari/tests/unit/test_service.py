@@ -27,6 +27,7 @@ from masakari import exception
 from masakari import manager
 from masakari import rpc
 from masakari import service
+from masakari import service_backend
 from masakari.tests.unit import base
 
 CONF = cfg.CONF
@@ -118,6 +119,9 @@ class TestWSGIService(base.NoDBTestCase):
         super(TestWSGIService, self).setUp()
         self.stub_out('masakari.api.wsgi.Loader.load_app', mock.MagicMock())
 
+    def tearDown(self):
+        super(TestWSGIService, self).tearDown()
+
     def test_workers_set_default(self):
         test_service = service.WSGIService("masakari_api")
         self.assertEqual(test_service.workers, processutils.get_worker_count())
@@ -139,41 +143,60 @@ class TestWSGIService(base.NoDBTestCase):
                           service.WSGIService, "masakari_api")
 
     def test_reset_pool_size_to_default(self):
-        test_service = service.WSGIService("test_service")
-        test_service.start()
+        # Test service lifecycle and pool management
+        with mock.patch('masakari.api.wsgi.DynamicThreadPoolExecutor') as \
+            mock_executor_class:
+            # Create mock pools for different lifecycle stages
+            initial_pool = mock.Mock()
+            reset_pool = mock.Mock()
 
-        # Stopping the service, which in turn sets pool size to 0
-        test_service.stop()
-        self.assertEqual(test_service.server._pool.size, 0)
+            # Configure mock to return different pools on successive calls
+            mock_executor_class.side_effect = [initial_pool, reset_pool]
 
-        # Resetting pool size to default
-        test_service.reset()
-        test_service.start()
-        self.assertEqual(test_service.server._pool.size,
-                         CONF.wsgi.default_pool_size)
+            test_service = service.WSGIService("test_service")
+            test_service.start()
+
+            # Verify initial configuration and pool creation
+            self.assertEqual(test_service.server.pool_size,
+                           CONF.wsgi.default_pool_size)
+            self.assertIsNotNone(test_service.server._pool)
+
+            # Stopping the service, which calls shutdown on pool
+            test_service.stop()
+            initial_pool.shutdown.assert_called()
+
+            # Resetting pool size to default creates new pool
+            test_service.reset()
+
+            # Verify that reset preserved the correct configuration
+            self.assertEqual(test_service.server.pool_size,
+                           CONF.wsgi.default_pool_size)
+            self.assertIsNotNone(test_service.server._pool)
+
+            # Verify that DynamicThreadPoolExecutor was called twice:
+            # once during initial creation, once during reset
+            self.assertEqual(mock_executor_class.call_count, 2)
 
 
 class TestLauncher(base.NoDBTestCase):
 
-    @mock.patch.object(_service, 'launch')
+    @mock.patch.object(service_backend, 'launch_service')
     def test_launch_app(self, mock_launch):
         service._launcher = None
         service.serve(mock.sentinel.service)
         mock_launch.assert_called_once_with(mock.ANY,
                                             mock.sentinel.service,
-                                            workers=None,
-                                            restart_method='mutate')
+                                            workers=None)
 
-    @mock.patch.object(_service, 'launch')
+    @mock.patch.object(service_backend, 'launch_service')
     def test_launch_app_with_workers(self, mock_launch):
         service._launcher = None
         service.serve(mock.sentinel.service, workers=mock.sentinel.workers)
         mock_launch.assert_called_once_with(mock.ANY,
                                             mock.sentinel.service,
-                                            workers=mock.sentinel.workers,
-                                            restart_method='mutate')
+                                            workers=mock.sentinel.workers)
 
-    @mock.patch.object(_service, 'launch')
+    @mock.patch.object(service_backend, 'launch_service')
     def test_launch_app_more_than_once_raises(self, mock_launch):
         service._launcher = None
         service.serve(mock.sentinel.service)
