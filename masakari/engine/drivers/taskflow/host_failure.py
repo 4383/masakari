@@ -13,8 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import eventlet
-from eventlet import greenpool
+from concurrent import futures
+import time
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -56,7 +56,7 @@ class DisableComputeServiceTask(base.MasakariTask):
         log_msg = ("Sleeping %(wait)s sec before starting recovery "
                "thread until nova recognizes the node down.")
         LOG.info(log_msg, {'wait': CONF.wait_period_after_service_update})
-        eventlet.sleep(CONF.wait_period_after_service_update)
+        time.sleep(CONF.wait_period_after_service_update)
         msg = "Disabled compute service on host: '%s'" % host_name
         self.update_details(msg, 1.0)
 
@@ -381,46 +381,135 @@ class EvacuateInstancesTask(base.MasakariTask):
                 # Set reserved property of reserved_host to False
                 self.update_host_method(context, reserved_host)
 
-            thread_pool = greenpool.GreenPool(
-                CONF.host_failure_recovery_threads)
-
-            nonlocal all_vmoves
-
+            # Submit all evacuation tasks using centralized driver thread pool
+            evacuation_futures = []
             for vmove in all_vmoves:
                 msg = ("Evacuation of instance started: '%s'"
                        % vmove.instance_uuid)
                 self.update_details(msg, 0.5)
-                thread_pool.spawn_n(self._evacuate_and_confirm, self.context,
-                                    vmove, reserved_host)
-            thread_pool.waitall()
+                # Use centralized spawn_driver for consistency and
+                # thread pool management
+                future = utils.spawn_driver(
+                    self._evacuate_and_confirm, self.context,
+                    vmove, reserved_host)
+                evacuation_futures.append(future)
 
-            all_vmoves = objects.VMoveList.get_all_vmoves(
+            # Track evacuation results for failure analysis
+            evacuation_results = {
+                'successful': 0,
+                'failed': 0,
+                'failure_details': []  # Store failure info for debugging
+            }
+
+            # Wait for all evacuations to complete and track results
+            for future in futures.as_completed(evacuation_futures):
+                try:
+                    future.result()  # This will raise any exceptions
+                    evacuation_results['successful'] += 1
+                except Exception as e:
+                    evacuation_results['failed'] += 1
+                    evacuation_results['failure_details'].append({
+                        'error': str(e),
+                        'timestamp': timeutils.utcnow()
+                    })
+                    LOG.exception("Exception in evacuation thread: %s", e)
+
+            # Evaluate evacuation failure rate and take action if necessary
+            total_evacuations = evacuation_results['successful'] + \
+                evacuation_results['failed']
+            if total_evacuations > 0:
+                failure_rate = evacuation_results['failed'] / \
+                    total_evacuations
+
+                threshold = CONF.host_failure.max_evacuation_failure_rate
+                # Check if failure rate exceeds threshold
+                if failure_rate > threshold:
+                    error_msg = (
+                        "High evacuation failure rate: %(failed)d out of "
+                        "%(total)d evacuations failed "
+                        "(%(failure_rate).1f%%) exceeded "
+                        "threshold of %(threshold).1f%%" % {
+                            'failed': evacuation_results['failed'],
+                            'total': total_evacuations,
+                            'failure_rate': failure_rate * 100,
+                            'threshold': threshold * 100
+                        })
+
+                    if CONF.host_failure.fail_fast_on_evacuation_errors:
+                        # Fail fast mode - raise exception to stop the
+                        # operation
+                        raise exception.EvacuationFailureThresholdExceeded(
+                            failed=evacuation_results['failed'],
+                            total=total_evacuations,
+                            failure_rate=failure_rate * 100,
+                            threshold=threshold * 100
+                        )
+                    else:
+                        # Best effort mode - log warning but continue
+                        LOG.warning(error_msg)
+                        msg = "High failure rate detected but continuing in " \
+                            "best effort mode"
+                        self.update_details(msg, 0.6)
+
+            updated_vmoves = objects.VMoveList.get_all_vmoves(
                 self.context, notification_uuid)
 
-            succeeded_vmoves = [i.instance_uuid for i in all_vmoves
+            succeeded_vmoves = [i.instance_uuid for i in updated_vmoves
                     if i.status == fields.VMoveStatus.SUCCEEDED]
+            failed_vmoves = [i.instance_uuid for i in
+                    updated_vmoves if i.status == fields.VMoveStatus.FAILED]
+
+            # Enhanced evacuation status reporting
+            if total_evacuations > 0:
+                success_rate = (
+                    len(succeeded_vmoves) / total_evacuations) * 100
+                msg = ("Evacuation summary: %(successful)d succeeded, "
+                       "%(failed)d failed out of %(total)d instances "
+                       "(%(success_rate).1f%% success rate) "
+                       "from host '%(host_name)s'") % {
+                    'successful': len(succeeded_vmoves),
+                    'failed': len(failed_vmoves),
+                    'total': total_evacuations,
+                    'success_rate': success_rate,
+                    'host_name': host_name
+                }
+                self.update_details(msg, 0.7)
+                LOG.info(msg)
+
             if succeeded_vmoves:
                 succeeded_vmoves.sort()
-                msg = ("Successfully evacuate instances '%(instance_list)s' "
-                       "from host '%(host_name)s'") % {
-                    'instance_list': ','.join(succeeded_vmoves),
-                    'host_name': host_name}
-                self.update_details(msg, 0.7)
+                msg = ("Successfully evacuated instances: "
+                       "'%(instance_list)s'") % {
+                    'instance_list': ','.join(succeeded_vmoves)}
+                self.update_details(msg, 0.8)
+                LOG.info(msg)
 
-            failed_vmoves = [i.instance_uuid for i in
-                    all_vmoves if i.status == fields.VMoveStatus.FAILED]
             if failed_vmoves:
-                msg = ("Failed to evacuate instances "
-                       "'%(instance_list)s' from host "
-                       "'%(host_name)s'") % {
-                    'instance_list': ','.join(failed_vmoves),
-                    'host_name': host_name}
-                self.update_details(msg, 0.7)
-                raise exception.HostRecoveryFailureException(
-                    message=msg)
+                failed_vmoves.sort()
+                msg = ("Failed to evacuate instances: '%(instance_list)s'") % {
+                    'instance_list': ','.join(failed_vmoves)}
+                self.update_details(msg, 0.8)
+                LOG.warning(msg)
 
-            msg = "Evacuation process completed!"
+                # Only raise HostRecoveryFailureException if ALL
+                # evacuations failed. This allows partial success
+                # scenarios to complete gracefully
+                if len(failed_vmoves) == total_evacuations:
+                    raise exception.HostRecoveryFailureException(message=msg)
+
+            # Determine final status based on evacuation results
+            if len(failed_vmoves) == 0:
+                status = "complete"
+                msg = "Evacuation process completed successfully!"
+            elif len(succeeded_vmoves) > 0:
+                status = "partial"
+                msg = "Evacuation process completed with partial success"
+            else:
+                status = "failed"
+                msg = "Evacuation process failed"
+
             self.update_details(msg, 1.0)
+            LOG.info("Evacuation finished with status: %s", status)
 
         lock_name = reserved_host if reserved_host else None
 

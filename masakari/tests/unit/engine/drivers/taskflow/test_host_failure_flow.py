@@ -16,6 +16,7 @@
 """
 Unit Tests for host failure TaskFlow
 """
+from concurrent import futures
 import copy
 from unittest import mock
 
@@ -56,7 +57,28 @@ class HostFailureTestCase(base.TestCase):
         self.notification_uuid = uuids.notification
         self.novaclient = nova.API()
         self.fake_client = fakes.FakeNovaClient()
+
+        # Patch utils.spawn_driver to use direct execution in tests
+        # This avoids issues with global thread pools in test environments
+        self.spawn_driver_patcher = mock.patch(
+            'masakari.engine.drivers.taskflow.host_failure.utils.spawn_driver',
+            side_effect=self._test_spawn_driver)
+        self.spawn_driver_patcher.start()
+        self.addCleanup(self.spawn_driver_patcher.stop)
+
         self.disabled_reason = CONF.host_failure.service_disable_reason
+
+    def _test_spawn_driver(self, func, *args, **kwargs):
+        """Test-friendly spawn_driver that executes directly."""
+
+        # Create a simple future that executes immediately
+        future = futures.Future()
+        try:
+            result = func(*args, **kwargs)
+            future.set_result(result)
+        except Exception as e:
+            future.set_exception(e)
+        return future
 
     def _verify_instance_evacuated(self):
 
@@ -221,10 +243,12 @@ class HostFailureTestCase(base.TestCase):
                       0.5),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances "
-                      f"'{sorted_uuids[0]},{sorted_uuids[1]}' from host "
-                      f"'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 2 succeeded, 0 failed "
+                      "out of 2 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: "
+                      f"'{sorted_uuids[0]},{sorted_uuids[1]}'", 0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -274,9 +298,12 @@ class HostFailureTestCase(base.TestCase):
                       f"'fake-host', instance uuids are: '{uuids.server_2}'"),
             mock.call(f"Evacuation of instance started: '{uuids.server_2}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances '{uuids.server_2}' "
-                      f"from host 'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 1 succeeded, 0 failed "
+                      "out of 1 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: '{uuids.server_2}'",
+                0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -346,10 +373,12 @@ class HostFailureTestCase(base.TestCase):
                       0.5),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances "
-                      f"'{sorted_uuids[0]},{sorted_uuids[1]}' from host "
-                      f"'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 2 succeeded, 0 failed "
+                      "out of 2 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: "
+                      f"'{sorted_uuids[0]},{sorted_uuids[1]}'", 0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -429,10 +458,12 @@ class HostFailureTestCase(base.TestCase):
                       0.5),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances "
-                      f"'{sorted_uuids[0]},{sorted_uuids[1]}' from host "
-                      f"'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 2 succeeded, 0 failed "
+                      "out of 2 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: "
+                      f"'{sorted_uuids[0]},{sorted_uuids[1]}'", 0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch.object(nova.API, 'add_host_to_aggregate')
@@ -498,9 +529,12 @@ class HostFailureTestCase(base.TestCase):
                       "aggregate 'fake_agg'.", 1.0),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances '{uuids.server_1}' "
-                      f"from host 'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 1 succeeded, 0 failed "
+                      "out of 1 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: '{uuids.server_1}'",
+                0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @ddt.data('rescued', 'paused', 'shelved', 'suspended',
@@ -541,10 +575,12 @@ class HostFailureTestCase(base.TestCase):
                       0.5),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances "
-                      f"'{sorted_uuids[0]},{sorted_uuids[1]}' from host "
-                      f"'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 2 succeeded, 0 failed "
+                      "out of 2 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: "
+                      f"'{sorted_uuids[0]},{sorted_uuids[1]}'", 0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -592,9 +628,12 @@ class HostFailureTestCase(base.TestCase):
                       f"'fake-host', instance uuids are: '{uuids.server_2}'"),
             mock.call(f"Evacuation of instance started: '{uuids.server_2}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances '{uuids.server_2}' "
-                      f"from host 'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 1 succeeded, 0 failed "
+                      "out of 1 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: '{uuids.server_2}'",
+                0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -705,8 +744,10 @@ class HostFailureTestCase(base.TestCase):
                       f"'fake-host', instance uuids are: '{uuids.server_1}'"),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Failed to evacuate instances '{uuids.server_1}' from "
-                      f"host 'fake-host'", 0.7)
+            mock.call("Evacuation summary: 0 succeeded, 1 failed "
+                      "out of 1 instances (0.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Failed to evacuate instances: '{uuids.server_1}'", 0.8)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -788,11 +829,13 @@ class HostFailureTestCase(base.TestCase):
                       0.5),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances "
+            mock.call("Evacuation summary: 3 succeeded, 0 failed "
+                      "out of 3 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: "
                       f"'{sorted_uuids[0]},{sorted_uuids[1]},"
-                      f"{sorted_uuids[2]}' "
-                      f"from host 'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+                      f"{sorted_uuids[2]}'", 0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
@@ -861,10 +904,12 @@ class HostFailureTestCase(base.TestCase):
                       0.5),
             mock.call(f"Evacuation of instance started: '{uuids.server_1}'",
                       0.5),
-            mock.call(f"Successfully evacuate instances "
-                      f"'{sorted_uuids[0]},{sorted_uuids[1]}' from host "
-                      f"'fake-host'", 0.7),
-            mock.call('Evacuation process completed!', 1.0)
+            mock.call("Evacuation summary: 2 succeeded, 0 failed "
+                      "out of 2 instances (100.0% success rate) from host "
+                      "'fake-host'", 0.7),
+            mock.call(f"Successfully evacuated instances: "
+                      f"'{sorted_uuids[0]},{sorted_uuids[1]}'", 0.8),
+            mock.call('Evacuation process completed successfully!', 1.0)
         ])
 
     @mock.patch('masakari.compute.nova.novaclient')
